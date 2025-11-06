@@ -101,6 +101,7 @@ class ConvCNPWeatherE2E(nn.Module):
         state_dict = torch.load(
             "{}/epoch_{}".format(se_model_path, best_epoch),
             map_location="cuda",
+            weights_only=False,
         )["model_state_dict"]
         state_dict = {k[7:]: v for k, v in zip(state_dict.keys(), state_dict.values())}
         model.load_state_dict(state_dict)
@@ -129,6 +130,7 @@ class ConvCNPWeatherE2E(nn.Module):
         state_dict = torch.load(
             f"{forecast_model_path}/forecast_{lead_time}/epoch_0",
             map_location="cuda",
+            weights_only=False,
         )["model_state_dict"]
         state_dict = {k[7:]: v for k, v in zip(state_dict.keys(), state_dict.values())}
         model.load_state_dict(state_dict)
@@ -158,7 +160,7 @@ class ConvCNPWeatherE2E(nn.Module):
             np.load("{}/lt_{}/losses_0.npy".format(sf_model_path, lead_time))
         )
         full_state_dict = torch.load(
-            sf_model_path + f"/lt_{lead_time}/epoch_{best_epoch}", map_location="cuda"
+            sf_model_path + f"/lt_{lead_time}/epoch_{best_epoch}", map_location="cuda", weights_only=False
         )
         state_dict = full_state_dict["model_state_dict"]
         state_dict = {k[7:]: v for k, v in zip(state_dict.keys(), state_dict.values())}
