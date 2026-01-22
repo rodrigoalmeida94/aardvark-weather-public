@@ -391,7 +391,7 @@ class WeatherDataset(Dataset):
                 + "hadisd_processed/{}_vals_{}.memmap".format(var, self.mode),
                 dtype="float32",
                 mode="r",
-                shape=get_hadisd_shape(mode),
+                shape=get_hadisd_shape(mode, var=var),
             )
 
             self.hadisd_x.append(np.stack([lon, lat], axis=-1) / LATLON_SCALE_FACTOR)
@@ -763,7 +763,7 @@ class HadISDDataset(Dataset):
             data_path + f"hadisd_processed/{var}_vals_{mode}.memmap",
             dtype="float32",
             mode="r",
-            shape=get_hadisd_shape(mode),
+            shape=get_hadisd_shape(mode, var=var),
         )
 
         lon = lon_to_0_360(

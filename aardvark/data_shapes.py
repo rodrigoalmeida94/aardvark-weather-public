@@ -18,7 +18,7 @@ GRIDSAT_Y_SHAPE = (48211, 2, 514, 200)
 IASI_Y_SHAPE = (23373, 360, 181, 52)
 
 
-def get_hadisd_shape(mode):
+def get_hadisd_shape(mode, var=None):
     """
     Return the shape of the HadISD array depending on variable
     """
