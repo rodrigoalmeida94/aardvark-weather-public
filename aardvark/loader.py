@@ -44,7 +44,7 @@ class WeatherDataset(Dataset):
         self.diff = diff
 
         # Date indexing
-        self.dates = pd.date_range(start_date, end_date, freq="6H")
+        self.dates = pd.date_range(start_date, end_date, freq="6h")
         if self.filter_dates == "start":
             self.index = np.array([i for i, d in enumerate(self.dates) if d.month < 7])
         elif self.filter_dates == "end":
@@ -743,7 +743,7 @@ class HadISDDataset(Dataset):
         self.mode = mode
         self.start_date = start_date
         self.device = device
-        dates = pd.date_range(start_date, end_date, freq="6H")
+        dates = pd.date_range(start_date, end_date, freq="6h")
         self.index = np.array(range(len(dates)))
 
         # Load the hadISD data
@@ -843,7 +843,7 @@ class AardvarkICDataset(Dataset):
                 print((start_date, end_date))
                 raise Exception("Invalid start and end date")
 
-            dates = pd.date_range(start_date, end_date, freq="6H")
+            dates = pd.date_range(start_date, end_date, freq="6h")
 
             self.data = np.memmap(
                 "path_to_encoder_predictions/" + ic_fname,
@@ -864,7 +864,7 @@ class AardvarkICDataset(Dataset):
                 print((start_date, end_date))
                 raise Exception("Invalid start and end date.")
 
-            dates = pd.date_range(start_date, end_date, freq="6H")[(lead_time) * 4 :]
+            dates = pd.date_range(start_date, end_date, freq="6h")[(lead_time) * 4 :]
             ic_shape = (len(dates), 121, 240, 24)
 
             self.data = np.memmap(
@@ -928,7 +928,7 @@ class WeatherDatasetDownscaling(Dataset):
         self.res = res
         self.context_mode = context_mode
 
-        self.dates = pd.date_range(start_date, end_date, freq="6H")
+        self.dates = pd.date_range(start_date, end_date, freq="6h")
         self.index = np.array(range(len(self.dates)))
 
         # Load ERA5 data for pre-training
@@ -1149,7 +1149,7 @@ class ForecasterDatasetDownscaling(Dataset):
         self.mode = mode
         self.offset = np.timedelta64(lead_time, "D").astype("timedelta64[ns]")
 
-        self.dates = pd.date_range(start_date, end_date, freq="6H")[:-30]
+        self.dates = pd.date_range(start_date, end_date, freq="6h")[:-30]
 
         # Normalisation
         aux_data_path = "auxiliary_data_path/"
@@ -1197,7 +1197,7 @@ class ForecasterDatasetDownscaling(Dataset):
         Load the pre-saved Aardvark forecasts
         """
 
-        dates = pd.date_range(self.start_date, self.end_date, freq="6H")
+        dates = pd.date_range(self.start_date, self.end_date, freq="6h")
 
         if self.mode == "train":
             dates = dates[:-40]  # Need 10 day offset at end of year

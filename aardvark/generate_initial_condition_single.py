@@ -69,7 +69,7 @@ if __name__ == "__main__":
     # Iterate over loaders
     for label, date in zip(labels, dates):
 
-        n_times = pd.date_range(date[0], date[1], freq="6H")
+        n_times = pd.date_range(date[0], date[1], freq="6h")
 
         # Setup a memmap to write out to
         ic = np.memmap(

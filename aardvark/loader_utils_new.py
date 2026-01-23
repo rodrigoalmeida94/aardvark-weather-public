@@ -44,19 +44,19 @@ def generate_offsets(date_list, dates):
 
 
 IC_OFFSETS = generate_offsets(
-    date_list, pd.date_range("1999-01-02", "2021-12-31 18:00", freq="6H")
+    date_list, pd.date_range("1999-01-02", "2021-12-31 18:00", freq="6h")
 )
 
 AMSUA_OFFSETS = generate_offsets(
-    date_list, pd.date_range("2007-01-01", "2021-12-31 18:00", freq="6H")
+    date_list, pd.date_range("2007-01-01", "2021-12-31 18:00", freq="6h")
 )
 
 AMSUB_OFFSETS = generate_offsets(
-    date_list, pd.date_range("2007-01-01", "2021-12-31 18:00", freq="6H")
+    date_list, pd.date_range("2007-01-01", "2021-12-31 18:00", freq="6h")
 )
 
 ASCAT_OFFSETS = generate_offsets(
-    date_list, pd.date_range("2007-01-01", "2021-12-31", freq="6H")
+    date_list, pd.date_range("2007-01-01", "2021-12-31", freq="6h")
 )
 
 ATMS_OFFSETS = generate_offsets(
@@ -64,19 +64,19 @@ ATMS_OFFSETS = generate_offsets(
 )
 
 ICOADS_OFFSETS = generate_offsets(
-    date_list, pd.date_range("1999-01-01 06:00", "2021-12-31", freq="6H")
+    date_list, pd.date_range("1999-01-01 06:00", "2021-12-31", freq="6h")
 )
 
 IGRA_OFFSETS = generate_offsets(
-    date_list, pd.date_range("1999-01-01 00:00", "2021-12-31 18:00", freq="6H")
+    date_list, pd.date_range("1999-01-01 00:00", "2021-12-31 18:00", freq="6h")
 )
 
 SAT_OFFSETS = generate_offsets(
-    date_list, pd.date_range("1990-01-01 00:00", "2021-12-31 18:00", freq="6H")
+    date_list, pd.date_range("1990-01-01 00:00", "2021-12-31 18:00", freq="6h")
 )
 
 HADISD_OFFSETS = generate_offsets(
-    date_list, pd.date_range("1950-01-01 00:00", "2021-12-31 18:00", freq="6H")
+    date_list, pd.date_range("1950-01-01 00:00", "2021-12-31 18:00", freq="6h")
 )
 
 
