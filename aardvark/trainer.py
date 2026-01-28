@@ -7,9 +7,9 @@ from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 
-from misc_downscaling_functionality import *
-from models import *
-from loss_functions import *
+from aardvark.misc_downscaling_functionality import *
+from aardvark.models import *
+from aardvark.loss_functions import *
 
 sys.path.append("..")
 

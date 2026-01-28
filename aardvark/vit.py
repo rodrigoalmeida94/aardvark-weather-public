@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 from timm.models.vision_transformer import Block, PatchEmbed, trunc_normal_
 
-from architectures import MLP
+from aardvark.architectures import MLP
 
 
 def get_2d_sincos_pos_embed(embed_dim, grid_size_h, grid_size_w, cls_token=False):

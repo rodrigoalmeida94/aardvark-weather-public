@@ -4,8 +4,8 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-from models import ConvCNPWeather
-from misc_downscaling_functionality import ConvCNPWeatherOnToOff
+from aardvark.models import ConvCNPWeather
+from aardvark.misc_downscaling_functionality import ConvCNPWeatherOnToOff
 
 
 class ConvCNPWeatherE2E(nn.Module):

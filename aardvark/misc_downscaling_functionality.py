@@ -4,10 +4,10 @@ import torch
 import numpy as np
 import torch.nn as nn
 
-from set_convs import convDeepSet
-from unet_wrap_padding import Unet
-from vit import *
-from models import *
+from aardvark.set_convs import convDeepSet
+from aardvark.unet_wrap_padding import Unet
+from aardvark.vit import *
+from aardvark.models import *
 
 hadisd_publisher_shifts = {
     "tas": 273.15,

@@ -18,11 +18,11 @@ import torch.utils.data.distributed
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.distributed import init_process_group, destroy_process_group
 
-from loss_functions import WeightedRmseLoss, PressureWeightedRmseLoss, RmseLoss
-from trainer import DDPTrainer
-from loader import *
-from models import *
-from unet_wrap_padding import *
+from aardvark.loss_functions import WeightedRmseLoss, PressureWeightedRmseLoss, RmseLoss
+from aardvark.trainer import DDPTrainer
+from aardvark.loader import *
+from aardvark.models import *
+from aardvark.unet_wrap_padding import *
 
 torch.set_float32_matmul_precision("medium")
 

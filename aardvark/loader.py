@@ -6,8 +6,8 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from loader_utils_new import *
-from data_shapes import *
+from aardvark.loader_utils_new import *
+from aardvark.data_shapes import *
 
 
 class WeatherDataset(Dataset):

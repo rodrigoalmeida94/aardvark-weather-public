@@ -4,10 +4,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from architectures import MLP
-from set_convs import convDeepSet
-from unet_wrap_padding import *
-from vit import *
+from aardvark.architectures import MLP
+from aardvark.set_convs import convDeepSet
+from aardvark.unet_wrap_padding import *
+from aardvark.vit import *
 
 sys.path.append("../")
 
