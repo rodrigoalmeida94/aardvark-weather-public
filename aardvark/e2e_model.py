@@ -23,7 +23,7 @@ class ConvCNPWeatherE2E(nn.Module):
         forecast_model_path,
         sf_model_path,
         return_gridded=False,
-        aux_data_path=None,
+        aux_data_path="../data/",
     ):
 
         super().__init__()
@@ -31,6 +31,7 @@ class ConvCNPWeatherE2E(nn.Module):
         self.device = device
         self.lead_time = lead_time
         self.return_gridded = return_gridded
+        self.aux_data_path = aux_data_path or "../data/"
 
         # Load encoder
         self.se_model = self.load_se_model(se_model_path)
@@ -91,6 +92,7 @@ class ConvCNPWeatherE2E(nn.Module):
             int_channels=forecast_config["int_channels"],
             device="cuda",
             res=forecast_config["res"],
+            data_path=self.aux_data_path,
             gnp=bool(0),
             decoder=forecast_config["decoder"],
             mode=forecast_config["mode"],
@@ -122,6 +124,7 @@ class ConvCNPWeatherE2E(nn.Module):
             int_channels=forecast_config["int_channels"],
             device="cuda",
             res=forecast_config["res"],
+            data_path=self.aux_data_path,
             gnp=bool(0),
             decoder=forecast_config["decoder"],
             mode=forecast_config["mode"],
@@ -151,6 +154,7 @@ class ConvCNPWeatherE2E(nn.Module):
             int_channels=config["int_channels"],
             device="cuda",
             res=config["res"],
+            data_path=self.aux_data_path,
             decoder=config["decoder"],
             mode=config["mode"],
             film=False,
