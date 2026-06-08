@@ -26,6 +26,8 @@ class WeatherDataset(Dataset):
         res=1,
         filter_dates=None,
         diff=None,
+        data_path="/data/",
+        aux_data_path="/data/",
     ):
 
         super().__init__()
@@ -33,8 +35,8 @@ class WeatherDataset(Dataset):
         # Setup
         self.device = device
         self.mode = hadisd_mode
-        self.data_path = "path_to_data/"
-        self.aux_data_path = "path_to_auxiliary_data/"
+        self.data_path = data_path
+        self.aux_data_path = aux_data_path
         self.start_date = start_date
         self.end_date = end_date
         self.lead_time = lead_time
@@ -88,20 +90,20 @@ class WeatherDataset(Dataset):
         # Internal grid to longitude latitude correspondence
         self.era5_x = [
             self.to_tensor(
-                np.load(self.data_path + "era5/era5_x_{}.npy".format(self.res))
+                np.load(self.aux_data_path + "grid_lon_lat/era5_x_{}.npy".format(self.res))
             )
             / LATLON_SCALE_FACTOR,
             self.to_tensor(
-                np.load(self.data_path + "era5/era5_y_{}.npy".format(self.res))
+                np.load(self.aux_data_path + "grid_lon_lat/era5_y_{}.npy".format(self.res))
             )
             / LATLON_SCALE_FACTOR,
         ]
 
-        # Orography
+        # Orography — file shape is (240, 121, C), permute to (C, 240, 121)
         self.era5_elev = self.to_tensor(
             np.load(self.data_path + "era5/elev_vars_{}.npy".format(self.res))
         )
-        self.era5_elev = torch.flip(self.era5_elev.permute(0, 2, 1), [-1])
+        self.era5_elev = torch.flip(self.era5_elev.permute(2, 0, 1), [-2])
         xx, yy = torch.meshgrid(self.era5_x[0], self.era5_x[1])
         self.era5_lonlat = torch.stack([xx, yy])
 
@@ -156,16 +158,10 @@ class WeatherDataset(Dataset):
             / LATLON_SCALE_FACTOR
         )
         self.icoads_means = self.to_tensor(
-            np.load(self.aux_data_path + "norm_factors/mean_icoads.npy")
+            np.load(self.aux_data_path + "norm_factors/mean_icoads.npy")[:, np.newaxis]
         )
         self.icoads_stds = self.to_tensor(
-            np.load(self.aux_data_path + "norm_factors/std_icoads.npy")
-        )
-        self.icoads_means = self.to_tensor(
-            np.nanmean(self.icoads_y[-365 * 4 :, ...], axis=(0, 2))[:, np.newaxis]
-        )
-        self.icoads_stds = self.to_tensor(
-            np.nanstd(self.icoads_y[-365 * 4 :, ...], axis=(0, 2))[:, np.newaxis]
+            np.load(self.aux_data_path + "norm_factors/std_icoads.npy")[:, np.newaxis]
         )
         self.icoads_index_offset = ICOADS_OFFSETS[self.start_date]
         return
@@ -462,11 +458,18 @@ class WeatherDataset(Dataset):
         return x
 
     def norm_data(self, x, means, stds):
-        return (x - means) / stds
+        if isinstance(stds, torch.Tensor):
+            safe_stds = stds.clone()
+            safe_stds[safe_stds == 0] = 1.0
+        else:
+            safe_stds = np.where(stds == 0, 1.0, stds)
+        return (x - means) / safe_stds
 
     def norm_hadisd(self, x):
         for i in range(5):
-            x[i] = (x[i] - self.hadisd_means[i]) / self.hadisd_stds[i]
+            safe_std = self.hadisd_stds[i].clone()
+            safe_std[safe_std == 0] = 1.0
+            x[i] = (x[i] - self.hadisd_means[i]) / safe_std
         return x
 
     def __len__(self):
@@ -513,6 +516,8 @@ class WeatherDatasetAssimilation(WeatherDataset):
         var_end=24,
         diff=False,
         two_frames=False,
+        data_path="/data/",
+        aux_data_path="/data/",
     ):
 
         super().__init__(
@@ -525,6 +530,8 @@ class WeatherDatasetAssimilation(WeatherDataset):
             res=res,
             filter_dates=filter_dates,
             diff=diff,
+            data_path=data_path,
+            aux_data_path=aux_data_path,
         )
 
         # Setup
@@ -1307,6 +1314,8 @@ class ForecastLoader(Dataset):
         finetune_step=None,
         finetune_eval_every=100,
         eval_steps=False,
+        data_path="/data/",
+        aux_data_path="/data/",
     ):
 
         super().__init__()
@@ -1314,7 +1323,7 @@ class ForecastLoader(Dataset):
         # Setup
         self.device = device
         self.mode = mode
-        self.data_path = "data_path/"
+        self.data_path = data_path
 
         self.lead_time = lead_time
         self.era5_mode = era5_mode
@@ -1339,7 +1348,7 @@ class ForecastLoader(Dataset):
             freq = "1D"
 
         if self.mode == "train":
-            self.dates = pd.date_range("1979-01-01", "2017-12-31", freq=freq)
+            self.dates = pd.date_range("2007-01-02", "2017-12-31", freq=freq)
         elif self.mode == "tune":
             self.dates = pd.date_range("2018-01-01", "2018-12-31", freq=freq)
         elif self.mode == "test":
@@ -1405,10 +1414,11 @@ class ForecastLoader(Dataset):
                 shape=ic_shape,
             )
 
-        # Orography
+        # Orography — file shape is (240, 121, C), transpose to (C, 240, 121)
         self.era5_elev = np.float32(
             np.load(self.data_path + "era5/elev_vars_{}.npy".format(res))
         )
+        self.era5_elev = self.era5_elev.transpose(2, 0, 1)
         elev_mean = self.era5_elev.mean(axis=(1, 2))[:, np.newaxis, np.newaxis]
         elev_std = self.era5_elev.std(axis=(1, 2))[:, np.newaxis, np.newaxis]
         self.era5_elev = (self.era5_elev - elev_mean) / elev_std
@@ -1656,8 +1666,8 @@ class ForecastLoader(Dataset):
 
         else:
             if self.norm:
-                y_context[:24, ...] = self.norm_era5(y_context[:24, ...], lt_offset)
-                y_target = self.norm_era5(y_target, lt_offset)
+                y_context[:24, ...] = self.norm_era5(y_context[:24, ...])
+                y_target = self.norm_era5(y_target)
             y_target = y_target.permute(2, 1, 0)
 
         if self.rollout:
