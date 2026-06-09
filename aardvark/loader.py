@@ -1717,6 +1717,8 @@ class WeatherDatasetE2E(WeatherDataset):
         diff=False,
         two_frames=False,
         region="global",
+        data_path="/data/",
+        aux_data_path="/data/",
     ):
 
         super().__init__(
@@ -1729,6 +1731,8 @@ class WeatherDatasetE2E(WeatherDataset):
             res=res,
             filter_dates=filter_dates,
             diff=diff,
+            data_path=data_path,
+            aux_data_path=aux_data_path,
         )
 
         # Setup
@@ -1754,6 +1758,8 @@ class WeatherDatasetE2E(WeatherDataset):
             var_end=24,
             diff=False,
             two_frames=False,
+            data_path=data_path,
+            aux_data_path=aux_data_path,
         )
 
         # Initialise forecast dataset
@@ -1767,6 +1773,8 @@ class WeatherDatasetE2E(WeatherDataset):
             diff=True,
             u_only=False,
             random_lt=False,
+            data_path=data_path,
+            aux_data_path=aux_data_path,
         )
 
         # Initialise downscaling dataset
