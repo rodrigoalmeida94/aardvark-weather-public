@@ -26,6 +26,6 @@ def get_hadisd_shape(mode, var=None):
     if mode != "train":
         dim_1 = 415
     else:
-        var_dict = {"tas": 8719, "tds": 8617, "psl": 8016, "u": 8721, "v": 8721}
+        var_dict = {"tas": 9549, "tds": 9447, "psl": 8846, "u": 9551, "v": 9551}
         dim_1 = var_dict[var]
     return (106652, dim_1)

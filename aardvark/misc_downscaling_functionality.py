@@ -55,6 +55,9 @@ class DownscalingRmseLoss(nn.Module):
         clean_target = target[~tmp]
         clean_output = output[~tmp]
 
+        if len(clean_target) == 0:
+            return torch.tensor(float("nan"), device=output.device, requires_grad=True)
+
         return torch.mean((clean_target - clean_output) ** 2)
 
 
@@ -128,7 +131,7 @@ class ConvCNPWeatherOnToOff(nn.Module):
 
         # Postprocessing MLP
         self.mlp = DownscalingMLP(
-            in_channels=24 + 9,
+            in_channels=self.int_channels + 9,
             out_channels=1,
             h_channels=64,
             h_layers=2,

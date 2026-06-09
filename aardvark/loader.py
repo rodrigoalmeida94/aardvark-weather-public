@@ -189,10 +189,10 @@ class WeatherDataset(Dataset):
         self.igra_x = self.igra_x / LATLON_SCALE_FACTOR
 
         self.igra_means = self.to_tensor(
-            np.load(self.aux_data_path + "norm_factors/mean_igra.npy")
+            np.load(self.aux_data_path + "norm_factors/mean_igra.npy")[:, np.newaxis]
         )
         self.igra_stds = self.to_tensor(
-            np.load(self.aux_data_path + "norm_factors/std_igra.npy")
+            np.load(self.aux_data_path + "norm_factors/std_igra.npy")[:, np.newaxis]
         )
 
         self.igra_index_offset = IGRA_OFFSETS[self.start_date]
@@ -325,10 +325,10 @@ class WeatherDataset(Dataset):
         self.sat_index_offset = SAT_OFFSETS[self.start_date]
 
         self.sat_means = self.to_tensor(
-            np.load(self.aux_data_path + "norm_factors/mean_sat.npy")
+            np.load(self.aux_data_path + "norm_factors/mean_sat.npy")[:, np.newaxis, np.newaxis]
         )
         self.sat_stds = self.to_tensor(
-            np.load(self.aux_data_path + "norm_factors/std_sat.npy")
+            np.load(self.aux_data_path + "norm_factors/std_sat.npy")[:, np.newaxis, np.newaxis]
         )
 
         return

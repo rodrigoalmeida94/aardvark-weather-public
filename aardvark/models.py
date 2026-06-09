@@ -3,6 +3,7 @@ import sys
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint as checkpoint
 
 from aardvark.architectures import MLP
 from aardvark.set_convs import convDeepSet
@@ -10,6 +11,143 @@ from aardvark.unet_wrap_padding import *
 from aardvark.vit import *
 
 sys.path.append("../")
+
+
+class ConditionalLayerNorm(nn.Module):
+    """LayerNorm whose scale and shift are predicted from a noise embedding.
+
+    Initialised so it acts as identity at the start of training
+    (zero-init projection keeps scale=0, shift=0 → output = LN(x)).
+    """
+
+    def __init__(self, dim: int, noise_dim: int):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim, elementwise_affine=False)
+        self.proj = nn.Linear(noise_dim, 2 * dim)
+        nn.init.zeros_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
+
+    def forward(self, x: torch.Tensor, noise_emb: torch.Tensor) -> torch.Tensor:
+        x_norm = self.norm(x)
+        modulation = self.proj(noise_emb)
+        scale, shift = modulation.chunk(2, dim=-1)
+        return (1 + scale) * x_norm + shift
+
+
+class NoiseBlock(nn.Module):
+    """Wraps a timm ViT Block, replacing its LayerNorms with ConditionalLayerNorm."""
+
+    def __init__(self, block: nn.Module, noise_dim: int):
+        super().__init__()
+        dim = block.norm1.normalized_shape[0]
+        self.attn = block.attn
+        self.mlp = block.mlp
+        self.ls1 = block.ls1
+        self.ls2 = block.ls2
+        self.drop_path1 = block.drop_path1
+        self.drop_path2 = block.drop_path2
+        self.norm1 = ConditionalLayerNorm(dim, noise_dim)
+        self.norm2 = ConditionalLayerNorm(dim, noise_dim)
+
+    def forward(self, x: torch.Tensor, noise_emb: torch.Tensor) -> torch.Tensor:
+        x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x, noise_emb))))
+        x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x, noise_emb))))
+        return x
+
+
+class ViTCheckpointed(ViT):
+    """ViT with optional gradient checkpointing and noise conditioning.
+
+    Args:
+        use_noise_conditioning: When True, per-patch Gaussian noise is sampled
+            each forward pass and injected according to noise_mode.
+        noise_channels: Dimension of the raw noise vector per patch.
+        noise_mode: "norm" — noise conditions the pre-norm LayerNorms via
+            ConditionalLayerNorm. "embedding" — noise is added directly to
+            patch embeddings before the transformer blocks.
+    """
+
+    def __init__(
+        self,
+        *args,
+        use_noise_conditioning: bool = False,
+        noise_channels: int = 16,
+        noise_mode: str = "norm",
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.grad_checkpointing = False
+        self.use_noise_conditioning = use_noise_conditioning
+        self.noise_mode = noise_mode
+
+        if use_noise_conditioning:
+            embed_dim = self.blocks[0].attn.qkv.in_features
+            self.noise_channels = noise_channels
+            self.noise_mlp = nn.Sequential(
+                nn.Linear(noise_channels, embed_dim),
+                nn.SiLU(),
+                nn.Linear(embed_dim, embed_dim),
+                nn.LayerNorm(embed_dim),
+            )
+            if noise_mode == "norm":
+                self.blocks = nn.ModuleList(
+                    [NoiseBlock(blk, noise_dim=embed_dim) for blk in self.blocks]
+                )
+
+    def set_grad_checkpointing(self, enabled=True):
+        self.grad_checkpointing = enabled
+
+    def forward_encoder(self, x, lead_times, variables, noise_emb=None):
+        if isinstance(variables, list):
+            variables = tuple(variables)
+
+        if self.per_var_embedding:
+            embeds = []
+            var_ids = self.get_var_ids(variables, x.device)
+            for i in range(len(var_ids)):
+                idx = var_ids[i]
+                embeds.append(self.token_embeds[idx](x[:, i : i + 1]))
+            x = torch.stack(embeds, dim=1)
+            var_embed = self.get_var_emb(self.var_embed, variables)
+            x = x + var_embed.unsqueeze(2)
+            x = self.aggregate_variables(x)
+        else:
+            x = self.mlp(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+            x = self.token_embeds[0](x)
+
+        x = x + self.pos_embed
+        lead_time_emb = self.lead_time_embed(lead_times.unsqueeze(-1))
+        x = x + lead_time_emb.unsqueeze(1)
+        x = self.pos_drop(x)
+
+        if noise_emb is not None and self.noise_mode == "embedding":
+            x = x + noise_emb
+            noise_emb = None
+
+        for blk in self.blocks:
+            if self.grad_checkpointing and self.training:
+                args = (x, noise_emb) if noise_emb is not None else (x,)
+                x = checkpoint.checkpoint(blk, *args)
+            else:
+                x = blk(x, noise_emb) if noise_emb is not None else blk(x)
+        x = self.norm(x)
+        return x
+
+    def forward(self, x, lead_times=None, film_index=None):
+        if lead_times is None:
+            lead_times = torch.ones(x.shape[0], device=x.device).float().unsqueeze(-1)
+
+        noise_emb = None
+        if self.use_noise_conditioning:
+            xi = torch.randn(
+                x.shape[0], self.num_patches, self.noise_channels, device=x.device
+            )
+            noise_emb = self.noise_mlp(xi)
+
+        out = self.forward_encoder(x, lead_times[:, 0], self.default_vars, noise_emb=noise_emb)
+        preds = self.head(out)
+        preds = self.unpatchify(preds)
+        return preds.permute(0, 2, 3, 1)
 
 
 class ConvCNPWeather(nn.Module):
@@ -30,6 +168,8 @@ class ConvCNPWeather(nn.Module):
         decoder=None,
         film=False,
         two_frames=False,
+        use_noise_conditioning: bool = False,
+        noise_mode: str = "norm",
     ):
 
         super().__init__()
@@ -112,7 +252,7 @@ class ConvCNPWeather(nn.Module):
 
         # Instantiate the decoder. Here decoder refers to decoder in a convCNP (i.e the ViT backbone)
         if self.decoder == "vit":
-            self.decoder_lr = ViT(
+            self.decoder_lr = ViTCheckpointed(
                 in_channels=in_channels,
                 out_channels=out_channels,
                 h_channels=512,
@@ -120,10 +260,12 @@ class ConvCNPWeather(nn.Module):
                 patch_size=5,
                 per_var_embedding=True,
                 img_size=[240, 121],
+                use_noise_conditioning=use_noise_conditioning,
+                noise_mode=noise_mode,
             )
 
         elif self.decoder == "vit_assimilation":
-            self.decoder_lr = ViT(
+            self.decoder_lr = ViTCheckpointed(
                 in_channels=256,
                 out_channels=out_channels,
                 h_channels=512,
@@ -131,6 +273,8 @@ class ConvCNPWeather(nn.Module):
                 patch_size=3,
                 per_var_embedding=False,
                 img_size=[256, 128],
+                use_noise_conditioning=use_noise_conditioning,
+                noise_mode=noise_mode,
             )
 
         self.mlp = MLP(
@@ -147,7 +291,7 @@ class ConvCNPWeather(nn.Module):
         """
 
         encodings = []
-        for channel in range(4):
+        for channel in range(5):
             encodings.append(
                 self.hadisd_setconvs[channel](
                     x_in=[
@@ -305,17 +449,20 @@ class ConvCNPWeather(nn.Module):
         e = torch.flip(e, dims=[-1])
         return e
 
-    def forward(self, task, film_index):
+    def forward(self, task, film_index, noise_std=0.0):
 
         # Setup input
         if self.mode == "assimilation":
 
             self.int_grid = [i.to(task["y_target"].device) for i in self.int_grid]
+            # era5_elev has shape (B, C, 240, 121); flip lat dimension
+            elev = torch.flip(task["era5_elev_current"], dims=[3])
+            if elev.shape[1] > 5:
+                elev = elev[:, :5, ...]
             elev = nn.functional.interpolate(
-                torch.flip(task["era5_elev_current"].permute(0, 1, 3, 2), dims=[2]),
+                elev,
                 size=(self.int_grid[0].shape[1], self.int_grid[1].shape[1]),
             )
-            elev = torch.flip(task["era5_elev_current"].permute(0, 1, 3, 2), dims=[2])
 
             if not self.two_frames:
                 encodings = [
@@ -367,6 +514,9 @@ class ConvCNPWeather(nn.Module):
         if x.shape[-1] > x.shape[-2]:
             x = x.permute(0, 1, 3, 2)
 
+        if noise_std > 0.0:
+            x = x + torch.randn_like(x) * noise_std
+
         # Run ViT backbone
         if self.decoder == "vit":
             x = self.decoder_lr(x, lead_times=task["lt"])
@@ -382,6 +532,10 @@ class ConvCNPWeather(nn.Module):
         ):
             x = nn.functional.interpolate(x.permute(0, 3, 1, 2), size=(240, 121))
             return x.permute(0, 3, 2, 1)
+
+        elif np.logical_and(self.mode == "assimilation", self.decoder == "vit"):
+            x = nn.functional.interpolate(x, size=(121, 240))
+            return x.permute(0, 2, 3, 1)
 
         elif self.mode == "forecast":
             x = nn.functional.interpolate(x, size=(240, 121)).permute(0, 2, 3, 1)
