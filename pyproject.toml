@@ -1,0 +1,15 @@
+[project]
+name = "aardvark-weather"
+version = "0.0.0"
+description = "Vendored upstream aardvark-weather-public code (https://github.com/anna-allen/aardvark-weather-public), packaged so the `aardvark` namespace package is importable. Dependencies are managed by the parent uq-e2e project."
+requires-python = "==3.11.*"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# `aardvark/` is an implicit namespace package (no __init__.py), so point the
+# wheel target at it explicitly. Editable installs of this path dependency then
+# expose `aardvark.*` straight from the source tree.
+[tool.hatch.build.targets.wheel]
+packages = ["aardvark"]
