@@ -370,6 +370,7 @@ class WeatherDataset(Dataset):
         self.hadisd_alt = []
         self.hadisd_y = []
         hadisd_vars = ["tas", "tds", "psl", "u", "v"]
+        self.hadisd_vars = hadisd_vars
         for var in hadisd_vars:
             lon = lon_to_0_360(
                 np.load(
@@ -467,10 +468,22 @@ class WeatherDataset(Dataset):
         return (x - means) / safe_stds
 
     def norm_hadisd(self, x):
+        # Project tweak: the HadISD memmaps store raw physical values (e.g. tas in
+        # deg C), but the norm factors (mean_hadisd/std_hadisd) and unnormalise_hadisd_var
+        # operate in publisher-scaled space (value / hadisd_publisher_scales[var]).
+        # Divide each var by its publisher scale before standardising so the context
+        # obs match the factor space (and the scale the pretrained encoder was trained
+        # with). Standardisation is scale-invariant, so this leaves the encoder's
+        # actual inputs unchanged while keeping a single, consistent factor convention
+        # across encoder and decoder. Vars without a publisher scale (tds) use 1.0.
+        # See scripts/convert_observations.py, which computes the factors in this space.
+        from aardvark.misc_downscaling_functionality import hadisd_publisher_scales
+
         for i in range(5):
+            scale = hadisd_publisher_scales.get(self.hadisd_vars[i], 1.0)
             safe_std = self.hadisd_stds[i].clone()
             safe_std[safe_std == 0] = 1.0
-            x[i] = (x[i] - self.hadisd_means[i]) / safe_std
+            x[i] = (x[i] / scale - self.hadisd_means[i]) / safe_std
         return x
 
     def __len__(self):
