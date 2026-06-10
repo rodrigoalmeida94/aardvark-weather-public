@@ -1,3 +1,4 @@
+import os
 import time as timelib
 from time import time
 
@@ -1473,54 +1474,27 @@ class ForecastLoader(Dataset):
             .unsqueeze(0)
         )
 
-        self.diff_means_1 = (
-            self.to_tensor(
-                np.load(
-                    self.data_path
-                    + "norm_factors/mean_diff_{}_{}_6h.npy".format(
-                        self.era5_mode, self.res
-                    )
-                )
-            )
-            .unsqueeze(0)
-            .unsqueeze(0)
-        )
-        self.diff_stds_1 = (
-            self.to_tensor(
-                np.load(
-                    self.data_path
-                    + "norm_factors/std_diff_{}_{}_6h.npy".format(
-                        self.era5_mode, self.res
-                    )
-                )
-            )
-            .unsqueeze(0)
-            .unsqueeze(0)
-        )
+        # The 6h/12h tendency norm factors are only consumed by
+        # norm_era5_tendency under random_lt training. Load them lazily so
+        # eval (random_lt=False, lt_offset always 0) does not require files
+        # that may not have been computed (e.g. the 12h factor).
+        def _load_optional_norm(name):
+            path = self.data_path + "norm_factors/{}.npy".format(name)
+            if not os.path.exists(path):
+                return None
+            return self.to_tensor(np.load(path)).unsqueeze(0).unsqueeze(0)
 
-        self.diff_means_2 = (
-            self.to_tensor(
-                np.load(
-                    self.data_path
-                    + "norm_factors/mean_diff_{}_{}_12h.npy".format(
-                        self.era5_mode, self.res
-                    )
-                )
-            )
-            .unsqueeze(0)
-            .unsqueeze(0)
+        self.diff_means_1 = _load_optional_norm(
+            "mean_diff_{}_{}_6h".format(self.era5_mode, self.res)
         )
-        self.diff_stds_2 = (
-            self.to_tensor(
-                np.load(
-                    self.data_path
-                    + "norm_factors/std_diff_{}_{}_12h.npy".format(
-                        self.era5_mode, self.res
-                    )
-                )
-            )
-            .unsqueeze(0)
-            .unsqueeze(0)
+        self.diff_stds_1 = _load_optional_norm(
+            "std_diff_{}_{}_6h".format(self.era5_mode, self.res)
+        )
+        self.diff_means_2 = _load_optional_norm(
+            "mean_diff_{}_{}_12h".format(self.era5_mode, self.res)
+        )
+        self.diff_stds_2 = _load_optional_norm(
+            "std_diff_{}_{}_12h".format(self.era5_mode, self.res)
         )
 
         self.means_dict = {
