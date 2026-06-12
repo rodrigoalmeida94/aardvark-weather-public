@@ -325,7 +325,15 @@ class WeatherDataset(Dataset):
             shape=GRIDSAT_Y_SHAPE,
         )
 
-        xx = np.load(self.data_path + "gridsat/sat_x.npy") / LATLON_SCALE_FACTOR
+        # The converted sat_x.npy keeps the source NetCDF longitude origin
+        # (~0..360), but the pipeline this model was trained on starts the
+        # GRIDSAT grid at the dateline (cf. sample_data_final.pkl). Roll the
+        # lon axis here — and the data to match in get_index — so the
+        # (lon, value) pairing reproduces that convention. No-op if the file
+        # already starts at >= 180 deg.
+        xx = np.load(self.data_path + "gridsat/sat_x.npy")
+        self.sat_lon_roll = int(np.argmax(xx >= 180.0))
+        xx = np.roll(xx, -self.sat_lon_roll) / LATLON_SCALE_FACTOR
         yy = np.load(self.data_path + "gridsat/sat_y.npy") / LATLON_SCALE_FACTOR
         self.sat_x = [xx, yy]
         self.sat_index_offset = SAT_OFFSETS[self.start_date]
@@ -660,6 +668,10 @@ class WeatherDatasetAssimilation(WeatherDataset):
 
         # GRIDSAT
         sat_y = self.sat_y[index + self.sat_index_offset, ...]
+        if self.sat_lon_roll:
+            # Keep the values paired with the dateline-origin lon axis built
+            # in load_sat_data; (channel, lon, lat) -> roll the lon axis.
+            sat_y = np.roll(sat_y, -self.sat_lon_roll, axis=1)
         sat_x = [self.to_tensor(i) for i in self.sat_x]
         sat_y = self.to_tensor(sat_y)
         sat_y = self.norm_data(sat_y, self.sat_means, self.sat_stds)
@@ -821,9 +833,20 @@ class HadISDDataset(Dataset):
         )
 
         # Shared altitude normalisation factors (mean-std scheme), persisted once
-        # by convert_observations.py over all variables' stations.
-        self.alt_mean = np.load(aux_data_path + "norm_factors/mean_alt.npy")
-        self.alt_std = np.load(aux_data_path + "norm_factors/std_alt.npy")
+        # by convert_observations.py over all variables' stations. One (mean,
+        # std) pair per alt row: row 0 true station elevation (metres), row 1
+        # the demo pickle's second alt channel copied verbatim — already
+        # normalised, so its persisted factors are (0, 1) and the z-score below
+        # is a no-op for it.
+        self.alt_mean = np.load(aux_data_path + "norm_factors/mean_alt.npy").reshape(-1, 1)
+        self.alt_std = np.load(aux_data_path + "norm_factors/std_alt.npy").reshape(-1, 1)
+        if self.hadisd_alt.ndim != 2 or self.hadisd_alt.shape[0] != 2:
+            raise ValueError(
+                f"hadisd_processed/{var}_alt_{mode}.npy has shape "
+                f"{self.hadisd_alt.shape}; expected (2, n_stations) "
+                "(true station elevation, true minus ERA5 grid altitude) — "
+                "rerun convert_observations.py"
+            )
         return
 
     def norm_hadisd(self, x):
@@ -850,11 +873,12 @@ class HadISDDataset(Dataset):
         x_target = self.to_tensor(self.hadisd_x).permute(1, 0)
 
         # Get altitude and normalise using the shared mean-std factors. The alt
-        # arrays are 1D (n_stations,); expand to 2 channels so the target side
-        # matches the model's expected channel count (24 state + 5 time + 2 loc
-        # + 2 alt = 33).
+        # arrays are (2, n_stations) — row 0 true station elevation (z-scored
+        # here), row 1 the pickle's normalised second channel (passed through
+        # by its (0, 1) factors) — giving the model's expected channel count
+        # (24 state + 5 time + 2 loc + 2 alt = 33).
         alt_norm = (self.hadisd_alt - self.alt_mean) / self.alt_std
-        alt_target = self.to_tensor(alt_norm).unsqueeze(0).repeat(2, 1)
+        alt_target = self.to_tensor(alt_norm)
 
         # Get observations.
         #
