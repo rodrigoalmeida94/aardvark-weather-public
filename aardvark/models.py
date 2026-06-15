@@ -291,7 +291,7 @@ class ConvCNPWeather(nn.Module):
         """
 
         encodings = []
-        for channel in range(5):
+        for channel in range(4):
             encodings.append(
                 self.hadisd_setconvs[channel](
                     x_in=[
@@ -455,14 +455,11 @@ class ConvCNPWeather(nn.Module):
         if self.mode == "assimilation":
 
             self.int_grid = [i.to(task["y_target"].device) for i in self.int_grid]
-            # era5_elev has shape (B, C, 240, 121); flip lat dimension
-            elev = torch.flip(task["era5_elev_current"], dims=[3])
-            if elev.shape[1] > 5:
-                elev = elev[:, :5, ...]
             elev = nn.functional.interpolate(
-                elev,
+                torch.flip(task["era5_elev_current"].permute(0, 1, 3, 2), dims=[2]),
                 size=(self.int_grid[0].shape[1], self.int_grid[1].shape[1]),
             )
+            elev = torch.flip(task["era5_elev_current"].permute(0, 1, 3, 2), dims=[2])
 
             if not self.two_frames:
                 encodings = [
@@ -532,10 +529,6 @@ class ConvCNPWeather(nn.Module):
         ):
             x = nn.functional.interpolate(x.permute(0, 3, 1, 2), size=(240, 121))
             return x.permute(0, 3, 2, 1)
-
-        elif np.logical_and(self.mode == "assimilation", self.decoder == "vit"):
-            x = nn.functional.interpolate(x, size=(121, 240))
-            return x.permute(0, 2, 3, 1)
 
         elif self.mode == "forecast":
             x = nn.functional.interpolate(x, size=(240, 121)).permute(0, 2, 3, 1)
