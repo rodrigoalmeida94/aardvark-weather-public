@@ -155,6 +155,21 @@ class ConvCNPWeather(nn.Module):
     ConvCNP class used for the encoder and processor modules
     """
 
+    # Observation streams, in the channel order they are concatenated into the
+    # encoder input. Per-stream noise (use_stream_noise) is keyed by these names.
+    # Deterministic context (elev, climatology, aux_time) is intentionally excluded.
+    STREAM_NAMES = (
+        "iasi",
+        "ascat",
+        "hadisd",
+        "icoads",
+        "sat",
+        "amsua",
+        "amsub",
+        "igra",
+        "hirs",
+    )
+
     def __init__(
         self,
         in_channels,
@@ -170,6 +185,8 @@ class ConvCNPWeather(nn.Module):
         two_frames=False,
         use_noise_conditioning: bool = False,
         noise_mode: str = "norm",
+        use_stream_noise: bool = False,
+        stream_noise_init: float = 0.01,
     ):
 
         super().__init__()
@@ -186,6 +203,20 @@ class ConvCNPWeather(nn.Module):
         self.mode = mode
         self.film = film
         self.two_frames = two_frames
+
+        # Per-stream aleatoric noise: one learned Gaussian std per observation
+        # stream, injected into that stream's gridded encoding before the streams
+        # are concatenated. Because each stream occupies its own contiguous channel
+        # slice at that point, the perturbation is attributable to a single data
+        # source (unlike embed-dim noise, which mixes all streams into patch tokens).
+        self.use_stream_noise = use_stream_noise
+        if use_stream_noise:
+            # Store the std in inverse-softplus space so softplus(param) is the
+            # actual std and stays strictly positive; init so softplus(.) ≈ init.
+            init = torch.log(torch.expm1(torch.tensor(float(stream_noise_init))))
+            self.stream_noise_log_std = nn.ParameterDict(
+                {name: nn.Parameter(init.clone()) for name in self.STREAM_NAMES}
+            )
 
         N_SAT_VARS = 2
         N_ICOADS_VARS = 5
@@ -449,7 +480,61 @@ class ConvCNPWeather(nn.Module):
         e = torch.flip(e, dims=[-1])
         return e
 
-    def forward(self, task, film_index, noise_std=0.0):
+    def stream_noise_stds(self):
+        """Return the current learned std per observation stream as a plain dict.
+
+        Useful for attribution: reads off how much noise the model has learned to
+        attach to each data source. Returns an empty dict when stream noise is off.
+        """
+        if not self.use_stream_noise:
+            return {}
+        return {
+            name: nn.functional.softplus(self.stream_noise_log_std[name]).item()
+            for name in self.STREAM_NAMES
+        }
+
+    def _apply_stream_noise(self, enc, name, override):
+        """Add per-stream Gaussian noise to one stream's gridded encoding.
+
+        The std is the learned ``softplus(stream_noise_log_std[name])`` unless
+        ``override`` supplies an absolute std for this stream. ``override`` lets an
+        attribution sweep silence every stream but one (or scan a stream's std)
+        without touching the learned parameters. A std of 0 is a no-op.
+        """
+        if not self.use_stream_noise:
+            return enc
+        if override is not None and name in override:
+            std = override[name]
+            if std == 0:
+                return enc
+            std = torch.as_tensor(std, device=enc.device, dtype=enc.dtype)
+        else:
+            std = nn.functional.softplus(self.stream_noise_log_std[name])
+        return enc + torch.randn_like(enc) * std
+
+    def _obs_encodings(self, task, prefix, override):
+        """Build the observation-stream encodings for one timestep, noised per stream.
+
+        Returns the list in canonical ``STREAM_NAMES`` channel order so the
+        concatenated layout (and thus checkpoint compatibility) is unchanged.
+        """
+        builders = {
+            "iasi": self.encoder_iasi,
+            "ascat": self.encoder_ascat,
+            "hadisd": self.encoder_hadisd,
+            "icoads": self.encoder_icoads,
+            "sat": self.encoder_sat,
+            "amsua": self.encoder_amsua,
+            "amsub": self.encoder_amsub,
+            "igra": self.encoder_igra,
+            "hirs": self.encoder_hirs,
+        }
+        return [
+            self._apply_stream_noise(builders[name](task, prefix), name, override)
+            for name in self.STREAM_NAMES
+        ]
+
+    def forward(self, task, film_index, noise_std=0.0, stream_noise_override=None):
 
         # Setup input
         if self.mode == "assimilation":
@@ -461,47 +546,24 @@ class ConvCNPWeather(nn.Module):
             )
             elev = torch.flip(task["era5_elev_current"].permute(0, 1, 3, 2), dims=[2])
 
+            context = [
+                elev,
+                task["climatology_current"],
+                torch.ones_like(elev[:, :5, ...])
+                * task["aux_time_current"].unsqueeze(-1).unsqueeze(-1),
+            ]
             if not self.two_frames:
                 encodings = [
-                    self.encoder_iasi(task, "current"),
-                    self.encoder_ascat(task, "current"),
-                    self.encoder_hadisd(task, "current"),
-                    self.encoder_icoads(task, "current"),
-                    self.encoder_sat(task, "current"),
-                    self.encoder_amsua(task, "current"),
-                    self.encoder_amsub(task, "current"),
-                    self.encoder_igra(task, "current"),
-                    self.encoder_hirs(task, "current"),
-                    elev,
-                    task["climatology_current"],
-                    torch.ones_like(elev[:, :5, ...])
-                    * task["aux_time_current"].unsqueeze(-1).unsqueeze(-1),
+                    *self._obs_encodings(task, "current", stream_noise_override),
+                    *context,
                 ]
             else:
-                # Option to pass two timesteps (t=-1 and t=0) as input
+                # Option to pass two timesteps (t=-1 and t=0) as input. The same
+                # learned per-stream std is shared across the current/prev frame.
                 encodings = [
-                    self.encoder_iasi(task, "current"),
-                    self.encoder_ascat(task, "current"),
-                    self.encoder_hadisd(task, "current"),
-                    self.encoder_icoads(task, "current"),
-                    self.encoder_sat(task, "current"),
-                    self.encoder_amsua(task, "current"),
-                    self.encoder_amsub(task, "current"),
-                    self.encoder_igra(task, "current"),
-                    self.encoder_hirs(task, "current"),
-                    self.encoder_iasi(task, "prev"),
-                    self.encoder_ascat(task, "prev"),
-                    self.encoder_hadisd(task, "prev"),
-                    self.encoder_icoads(task, "prev"),
-                    self.encoder_sat(task, "prev"),
-                    self.encoder_amsua(task, "prev"),
-                    self.encoder_amsub(task, "prev"),
-                    self.encoder_igra(task, "prev"),
-                    self.encoder_hirs(task, "prev"),
-                    elev,
-                    task["climatology_current"],
-                    torch.ones_like(elev[:, :5, ...])
-                    * task["aux_time_current"].unsqueeze(-1).unsqueeze(-1),
+                    *self._obs_encodings(task, "current", stream_noise_override),
+                    *self._obs_encodings(task, "prev", stream_noise_override),
+                    *context,
                 ]
             x = torch.cat(encodings, dim=1)
 
