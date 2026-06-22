@@ -73,12 +73,15 @@ class ViTCheckpointed(ViT):
         use_noise_conditioning: bool = False,
         noise_channels: int = 16,
         noise_mode: str = "norm",
+        noise_terrain_cond: bool = False,
+        n_terrain: int = 2,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.grad_checkpointing = False
         self.use_noise_conditioning = use_noise_conditioning
         self.noise_mode = noise_mode
+        self.noise_terrain_cond = noise_terrain_cond
 
         if use_noise_conditioning:
             embed_dim = self.blocks[0].attn.qkv.in_features
@@ -93,6 +96,23 @@ class ViTCheckpointed(ViT):
                 self.blocks = nn.ModuleList(
                     [NoiseBlock(blk, noise_dim=embed_dim) for blk in self.blocks]
                 )
+            if noise_terrain_cond:
+                # Terrain-gated noise amplitude: a per-patch positive scale g(terrain)
+                # multiplies noise_emb, so the injected spread is heteroscedastic —
+                # larger over rough/land patches (high sdor), smaller over smooth
+                # ocean. Init to g ≡ 1 (zero-weight final layer, softplus-bias = 1)
+                # so a warm-started run is unchanged at step 0 and *learns* the
+                # terrain dependence under CRPS.
+                self.noise_scale_mlp = nn.Sequential(
+                    nn.Linear(n_terrain, 16),
+                    nn.SiLU(),
+                    nn.Linear(16, 1),
+                    nn.Softplus(),
+                )
+                nn.init.zeros_(self.noise_scale_mlp[2].weight)
+                # softplus(b) = 1  ->  b = log(e - 1)
+                inv_softplus_one = float(torch.log(torch.expm1(torch.tensor(1.0))))
+                nn.init.constant_(self.noise_scale_mlp[2].bias, inv_softplus_one)
 
     def set_grad_checkpointing(self, enabled=True):
         self.grad_checkpointing = enabled
@@ -133,7 +153,7 @@ class ViTCheckpointed(ViT):
         x = self.norm(x)
         return x
 
-    def forward(self, x, lead_times=None, film_index=None):
+    def forward(self, x, lead_times=None, film_index=None, terrain=None):
         if lead_times is None:
             lead_times = torch.ones(x.shape[0], device=x.device).float().unsqueeze(-1)
 
@@ -143,6 +163,10 @@ class ViTCheckpointed(ViT):
                 x.shape[0], self.num_patches, self.noise_channels, device=x.device
             )
             noise_emb = self.noise_mlp(xi)
+            if self.noise_terrain_cond and terrain is not None:
+                # g(terrain): (B, P, 1) positive per-patch amplitude, broadcast over
+                # the embed dim — terrain-aware (heteroscedastic) spread.
+                noise_emb = noise_emb * self.noise_scale_mlp(terrain)
 
         out = self.forward_encoder(x, lead_times[:, 0], self.default_vars, noise_emb=noise_emb)
         preds = self.head(out)
@@ -185,6 +209,7 @@ class ConvCNPWeather(nn.Module):
         two_frames=False,
         use_noise_conditioning: bool = False,
         noise_mode: str = "norm",
+        noise_terrain_cond: bool = False,
         use_stream_noise: bool = False,
         stream_noise_init: float = 0.01,
     ):
@@ -192,6 +217,8 @@ class ConvCNPWeather(nn.Module):
         super().__init__()
 
         self.device = device
+        # Terrain-gated noise amplitude (only meaningful with noise conditioning).
+        self.noise_terrain_cond = bool(noise_terrain_cond) and bool(use_noise_conditioning)
 
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -293,6 +320,7 @@ class ConvCNPWeather(nn.Module):
                 img_size=[240, 121],
                 use_noise_conditioning=use_noise_conditioning,
                 noise_mode=noise_mode,
+                noise_terrain_cond=self.noise_terrain_cond,
             )
 
         elif self.decoder == "vit_assimilation":
@@ -306,6 +334,7 @@ class ConvCNPWeather(nn.Module):
                 img_size=[256, 128],
                 use_noise_conditioning=use_noise_conditioning,
                 noise_mode=noise_mode,
+                noise_terrain_cond=self.noise_terrain_cond,
             )
 
         self.mlp = MLP(
@@ -536,6 +565,10 @@ class ConvCNPWeather(nn.Module):
 
     def forward(self, task, film_index, noise_std=0.0, stream_noise_override=None):
 
+        # Per-patch terrain feature for the terrain-gated noise amplitude; stays
+        # None unless noise_terrain_cond is on (assimilation + vit_assimilation).
+        terrain = None
+
         # Setup input
         if self.mode == "assimilation":
 
@@ -545,6 +578,16 @@ class ConvCNPWeather(nn.Module):
                 size=(self.int_grid[0].shape[1], self.int_grid[1].shape[1]),
             )
             elev = torch.flip(task["era5_elev_current"].permute(0, 1, 3, 2), dims=[2])
+
+            if self.noise_terrain_cond:
+                # elev is (B, C, 240, 121) in the same frame as x; take sdor (ch2)
+                # and elevation (ch0), match x's interpolation to (256, 128), then
+                # average-pool to the ViT patch grid -> (B, num_patches, 2).
+                terr = elev[:, [2, 0], :, :]
+                terr = nn.functional.interpolate(terr, size=(256, 128))
+                gh, gw = self.decoder_lr.token_embeds[0].grid_size
+                terr = nn.functional.adaptive_avg_pool2d(terr, (gh, gw))
+                terrain = terr.flatten(2).transpose(1, 2)
 
             context = [
                 elev,
@@ -582,7 +625,7 @@ class ConvCNPWeather(nn.Module):
             x = x.permute(0, 3, 1, 2)
         else:
             x = nn.functional.interpolate(x, size=(256, 128))
-            x = self.decoder_lr(x, film_index=(task["lt"] * 0) + 1)
+            x = self.decoder_lr(x, film_index=(task["lt"] * 0) + 1, terrain=terrain)
 
         # Process outputs
 
