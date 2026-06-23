@@ -42,6 +42,22 @@ class convDeepSet(nn.Module):
         return norms_a + norms_b - 2 * torch.matmul(a, b.permute(0, 2, 1))
 
     def forward(self, x_in, wt, x_out):
+        # The SetConv uses a very small kernel length scale (init_ls ~1e-3, so
+        # ls**2 ~1e-6). The squared-distance form in pw_dists2
+        # (norms_a + norms_b - 2*a@b) plus exp(-0.5*dists2/ls**2) is numerically
+        # unstable in bf16: matmul cancellation can make dists2 slightly
+        # negative, and the exponent (scaled by 1/ls**2 ~ 1e6) then explodes to
+        # +inf -> NaN. Force this block to fp32 even under autocast. The guard is
+        # unconditional and a no-op for plain fp32 training (autocast inactive,
+        # .float() on fp32 tensors returns the tensor unchanged); it only bites
+        # when bf16 autocast is enabled, where this small block staying fp32 is
+        # cheap relative to the ViT decoder.
+        with torch.autocast(device_type=wt.device.type, enabled=False):
+            return self._forward_fp32(
+                [t.float() for t in x_in], wt.float(), [t.float() for t in x_out]
+            )
+
+    def _forward_fp32(self, x_in, wt, x_out):
 
         # Add a density channel
         density_channel = torch.ones_like(wt[:, 0:1, ...])
