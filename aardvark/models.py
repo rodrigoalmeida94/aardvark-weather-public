@@ -166,7 +166,19 @@ class ViTCheckpointed(ViT):
             if self.noise_terrain_cond and terrain is not None:
                 # g(terrain): (B, P, 1) positive per-patch amplitude, broadcast over
                 # the embed dim — terrain-aware (heteroscedastic) spread.
-                noise_emb = noise_emb * self.noise_scale_mlp(terrain)
+                #
+                # Mean-normalise g across patches so mean_patch(g) == 1: the gate
+                # can only *redistribute* spread (more over some patches, less over
+                # others), never rescale the global amplitude (that is the job of
+                # noise_mlp). Without this, a globally under/over-dispersed ensemble
+                # makes CRPS collapse the gate to a constant g != 1, expressing a
+                # global volume change instead of the intended terrain structure
+                # (observed empirically: the gate drifted to a uniform g < 1). The
+                # init g ≡ 1 is unchanged by the normalisation (1 / mean(1) = 1), so
+                # a warm-started run is still a no-op at step 0.
+                g = self.noise_scale_mlp(terrain)
+                g = g / g.mean(dim=1, keepdim=True).clamp_min(1e-6)
+                noise_emb = noise_emb * g
 
         out = self.forward_encoder(x, lead_times[:, 0], self.default_vars, noise_emb=noise_emb)
         preds = self.head(out)
@@ -580,10 +592,15 @@ class ConvCNPWeather(nn.Module):
             elev = torch.flip(task["era5_elev_current"].permute(0, 1, 3, 2), dims=[2])
 
             if self.noise_terrain_cond:
-                # elev is (B, C, 240, 121) in the same frame as x; take sdor (ch2)
+                # elev is (B, C, 240, 121) in the same frame as x; take sdor (ch4,
+                # std of sub-grid orography = the ruggedness the gate should key on)
                 # and elevation (ch0), match x's interpolation to (256, 128), then
                 # average-pool to the ViT patch grid -> (B, num_patches, 2).
-                terr = elev[:, [2, 0], :, :]
+                # NB: earlier code used ch2, which is `anor` (anisotropy), not sdor
+                # (see scripts/convert_orography.py for the channel layout); ch4 is
+                # the intended roughness feature. Pre-existing terrain checkpoints
+                # were trained on ch2 and must be retrained after this fix.
+                terr = elev[:, [4, 0], :, :]
                 terr = nn.functional.interpolate(terr, size=(256, 128))
                 gh, gw = self.decoder_lr.token_embeds[0].grid_size
                 terr = nn.functional.adaptive_avg_pool2d(terr, (gh, gw))
