@@ -222,6 +222,7 @@ class ConvCNPWeather(nn.Module):
         use_noise_conditioning: bool = False,
         noise_mode: str = "norm",
         noise_terrain_cond: bool = False,
+        noise_channels: int = 16,
         use_stream_noise: bool = False,
         stream_noise_init: float = 0.01,
     ):
@@ -333,6 +334,7 @@ class ConvCNPWeather(nn.Module):
                 use_noise_conditioning=use_noise_conditioning,
                 noise_mode=noise_mode,
                 noise_terrain_cond=self.noise_terrain_cond,
+                noise_channels=noise_channels,
             )
 
         elif self.decoder == "vit_assimilation":
@@ -347,6 +349,7 @@ class ConvCNPWeather(nn.Module):
                 use_noise_conditioning=use_noise_conditioning,
                 noise_mode=noise_mode,
                 noise_terrain_cond=self.noise_terrain_cond,
+                noise_channels=noise_channels,
             )
 
         self.mlp = MLP(
