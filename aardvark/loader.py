@@ -409,6 +409,22 @@ class WeatherDataset(Dataset):
             self.hadisd_alt.append(alt)
             self.hadisd_y.append(vals)
 
+        # Authors'-station subset (uq-e2e surgical tweak): drop masks for the
+        # stations missing from the Aardvark authors' own lists, so the obs
+        # context matches the paper's setting. Masks are built by
+        # scripts/build_hadisd_station_subset.py; absent mask files or
+        # UQ_STATION_SUBSET=0 -> full station set.
+        self.hadisd_subset_drop = None
+        if os.environ.get("UQ_STATION_SUBSET", "1") != "0":
+            mask_paths = [
+                self.data_path
+                + "hadisd_processed/{}_pickle_subset_{}.npy".format(var, mode)
+                for var in hadisd_vars
+            ]
+            if all(os.path.exists(p) for p in mask_paths):
+                self.hadisd_subset_drop = [~np.load(p) for p in mask_paths]
+                print("HadISD: authors'-station subset active (obs context)")
+
         self.hadisd_index_offset = HADISD_OFFSETS[self.start_date]
 
         self.hadisd_means = [
@@ -721,6 +737,10 @@ class WeatherDatasetAssimilation(WeatherDataset):
         x_context_hadisd = [self.to_tensor(i).permute(1, 0) for i in x_context_hadisd]
         y_context_hadisd = [self.to_tensor(i) for i in y_context_hadisd]
         y_context_hadisd = self.norm_hadisd(y_context_hadisd)
+        if self.hadisd_subset_drop is not None:
+            # norm_hadisd returns fresh (arithmetic) tensors, so in-place is safe.
+            for y, drop in zip(y_context_hadisd, self.hadisd_subset_drop):
+                y[..., drop] = float("nan")
 
         # ERA5
         era5 = self.to_tensor(self.load_era5_time(index))
@@ -824,6 +844,18 @@ class HadISDDataset(Dataset):
         )
         self.hadisd_y = vals
 
+        # Authors'-station subset (uq-e2e surgical tweak): see
+        # WeatherDataset.load_hadisd. Applied to the target values in
+        # __getitem__ so verification matches the authors' station population.
+        self.subset_drop = None
+        if os.environ.get("UQ_STATION_SUBSET", "1") != "0":
+            mask_path = (
+                data_path + f"hadisd_processed/{var}_pickle_subset_{mode}.npy"
+            )
+            if os.path.exists(mask_path):
+                self.subset_drop = ~np.load(mask_path)
+                print(f"HadISD {var}: authors'-station subset active (targets)")
+
         self.hadisd_index_offset = HADISD_OFFSETS[self.start_date]
         self.hadisd_means = self.to_tensor(
             np.load(aux_data_path + f"norm_factors/mean_hadisd_{var}.npy")
@@ -891,6 +923,9 @@ class HadISDDataset(Dataset):
         obs = self.to_tensor(self.hadisd_y[index + self.hadisd_index_offset, :])
         obs = obs + hadisd_publisher_shifts[self.var]
         y_target = self.norm_hadisd(obs)
+        if self.subset_drop is not None:
+            # norm_hadisd returns a fresh tensor, so in-place is safe.
+            y_target[self.subset_drop] = float("nan")
 
         assert x_target.shape[0] == 2
         n_stations = x_target.shape[1]
