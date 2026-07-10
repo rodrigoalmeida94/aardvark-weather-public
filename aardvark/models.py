@@ -162,6 +162,11 @@ class ViTCheckpointed(ViT):
             xi = torch.randn(
                 x.shape[0], self.num_patches, self.noise_channels, device=x.device
             )
+            # Optional hook (set externally, e.g. uq_e2e.correlated_noise): maps the
+            # raw i.i.d. per-patch draw to a spatially correlated field with the
+            # same unit marginals, so noise_mlp sees the statistics it trained on.
+            if getattr(self, "noise_xi_transform", None) is not None:
+                xi = self.noise_xi_transform(xi)
             noise_emb = self.noise_mlp(xi)
             if self.noise_terrain_cond and terrain is not None:
                 # g(terrain): (B, P, 1) positive per-patch amplitude, broadcast over
