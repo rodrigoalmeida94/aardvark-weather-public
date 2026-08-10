@@ -17,12 +17,12 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.distributed import init_process_group, destroy_process_group
 
 
-from trainer import DDPTrainer
-from loss_functions import WeightedRmseLoss, PressureWeightedRmseLoss, RmseLoss
-from misc_downscaling_functionality import ConvCNPWeatherOnToOff, DownscalingRmseLoss
-from loader import *
-from models import *
-from unet_wrap_padding import *
+from aardvark.trainer import DDPTrainer
+from aardvark.loss_functions import WeightedRmseLoss, PressureWeightedRmseLoss, RmseLoss
+from aardvark.misc_downscaling_functionality import ConvCNPWeatherOnToOff, DownscalingRmseLoss
+from aardvark.loader import *
+from aardvark.models import *
+from aardvark.unet_wrap_padding import *
 
 
 sys.path.append("../npw/data")

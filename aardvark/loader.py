@@ -1,3 +1,4 @@
+import os
 import time as timelib
 from time import time
 
@@ -6,8 +7,13 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from loader_utils_new import *
-from data_shapes import *
+from aardvark.loader_utils_new import *
+from aardvark.data_shapes import *
+from aardvark.misc_downscaling_functionality import (
+    hadisd_publisher_shifts,
+    normalise_hadisd_var,
+    unnormalise_hadisd_var,
+)
 
 
 class WeatherDataset(Dataset):
@@ -26,6 +32,8 @@ class WeatherDataset(Dataset):
         res=1,
         filter_dates=None,
         diff=None,
+        data_path="/data/",
+        aux_data_path="/data/",
     ):
 
         super().__init__()
@@ -33,8 +41,8 @@ class WeatherDataset(Dataset):
         # Setup
         self.device = device
         self.mode = hadisd_mode
-        self.data_path = "path_to_data/"
-        self.aux_data_path = "path_to_auxiliary_data/"
+        self.data_path = data_path
+        self.aux_data_path = aux_data_path
         self.start_date = start_date
         self.end_date = end_date
         self.lead_time = lead_time
@@ -44,7 +52,7 @@ class WeatherDataset(Dataset):
         self.diff = diff
 
         # Date indexing
-        self.dates = pd.date_range(start_date, end_date, freq="6H")
+        self.dates = pd.date_range(start_date, end_date, freq="6h")
         if self.filter_dates == "start":
             self.index = np.array([i for i, d in enumerate(self.dates) if d.month < 7])
         elif self.filter_dates == "end":
@@ -88,20 +96,20 @@ class WeatherDataset(Dataset):
         # Internal grid to longitude latitude correspondence
         self.era5_x = [
             self.to_tensor(
-                np.load(self.data_path + "era5/era5_x_{}.npy".format(self.res))
+                np.load(self.aux_data_path + "grid_lon_lat/era5_x_{}.npy".format(self.res))
             )
             / LATLON_SCALE_FACTOR,
             self.to_tensor(
-                np.load(self.data_path + "era5/era5_y_{}.npy".format(self.res))
+                np.load(self.aux_data_path + "grid_lon_lat/era5_y_{}.npy".format(self.res))
             )
             / LATLON_SCALE_FACTOR,
         ]
 
-        # Orography
+        # Orography — file shape is (240, 121, C), permute to (C, 240, 121)
         self.era5_elev = self.to_tensor(
             np.load(self.data_path + "era5/elev_vars_{}.npy".format(self.res))
         )
-        self.era5_elev = torch.flip(self.era5_elev.permute(0, 2, 1), [-1])
+        self.era5_elev = torch.flip(self.era5_elev.permute(2, 1, 0), [-1])
         xx, yy = torch.meshgrid(self.era5_x[0], self.era5_x[1])
         self.era5_lonlat = torch.stack([xx, yy])
 
@@ -156,16 +164,10 @@ class WeatherDataset(Dataset):
             / LATLON_SCALE_FACTOR
         )
         self.icoads_means = self.to_tensor(
-            np.load(self.aux_data_path + "norm_factors/mean_icoads.npy")
+            np.load(self.aux_data_path + "norm_factors/mean_icoads.npy")[:, np.newaxis]
         )
         self.icoads_stds = self.to_tensor(
-            np.load(self.aux_data_path + "norm_factors/std_icoads.npy")
-        )
-        self.icoads_means = self.to_tensor(
-            np.nanmean(self.icoads_y[-365 * 4 :, ...], axis=(0, 2))[:, np.newaxis]
-        )
-        self.icoads_stds = self.to_tensor(
-            np.nanstd(self.icoads_y[-365 * 4 :, ...], axis=(0, 2))[:, np.newaxis]
+            np.load(self.aux_data_path + "norm_factors/std_icoads.npy")[:, np.newaxis]
         )
         self.icoads_index_offset = ICOADS_OFFSETS[self.start_date]
         return
@@ -193,10 +195,10 @@ class WeatherDataset(Dataset):
         self.igra_x = self.igra_x / LATLON_SCALE_FACTOR
 
         self.igra_means = self.to_tensor(
-            np.load(self.aux_data_path + "norm_factors/mean_igra.npy")
+            np.load(self.aux_data_path + "norm_factors/mean_igra.npy")[:, np.newaxis]
         )
         self.igra_stds = self.to_tensor(
-            np.load(self.aux_data_path + "norm_factors/std_igra.npy")
+            np.load(self.aux_data_path + "norm_factors/std_igra.npy")[:, np.newaxis]
         )
 
         self.igra_index_offset = IGRA_OFFSETS[self.start_date]
@@ -323,16 +325,24 @@ class WeatherDataset(Dataset):
             shape=GRIDSAT_Y_SHAPE,
         )
 
-        xx = np.load(self.data_path + "gridsat/sat_x.npy") / LATLON_SCALE_FACTOR
+        # The converted sat_x.npy keeps the source NetCDF longitude origin
+        # (~0..360), but the pipeline this model was trained on starts the
+        # GRIDSAT grid at the dateline (cf. sample_data_final.pkl). Roll the
+        # lon axis here — and the data to match in get_index — so the
+        # (lon, value) pairing reproduces that convention. No-op if the file
+        # already starts at >= 180 deg.
+        xx = np.load(self.data_path + "gridsat/sat_x.npy")
+        self.sat_lon_roll = int(np.argmax(xx >= 180.0))
+        xx = np.roll(xx, -self.sat_lon_roll) / LATLON_SCALE_FACTOR
         yy = np.load(self.data_path + "gridsat/sat_y.npy") / LATLON_SCALE_FACTOR
         self.sat_x = [xx, yy]
         self.sat_index_offset = SAT_OFFSETS[self.start_date]
 
         self.sat_means = self.to_tensor(
-            np.load(self.aux_data_path + "norm_factors/mean_sat.npy")
+            np.load(self.aux_data_path + "norm_factors/mean_sat.npy")[:, np.newaxis, np.newaxis]
         )
         self.sat_stds = self.to_tensor(
-            np.load(self.aux_data_path + "norm_factors/std_sat.npy")
+            np.load(self.aux_data_path + "norm_factors/std_sat.npy")[:, np.newaxis, np.newaxis]
         )
 
         return
@@ -373,6 +383,7 @@ class WeatherDataset(Dataset):
         self.hadisd_alt = []
         self.hadisd_y = []
         hadisd_vars = ["tas", "tds", "psl", "u", "v"]
+        self.hadisd_vars = hadisd_vars
         for var in hadisd_vars:
             lon = lon_to_0_360(
                 np.load(
@@ -391,12 +402,28 @@ class WeatherDataset(Dataset):
                 + "hadisd_processed/{}_vals_{}.memmap".format(var, self.mode),
                 dtype="float32",
                 mode="r",
-                shape=get_hadisd_shape(mode),
+                shape=get_hadisd_shape(mode, var=var),
             )
 
             self.hadisd_x.append(np.stack([lon, lat], axis=-1) / LATLON_SCALE_FACTOR)
             self.hadisd_alt.append(alt)
             self.hadisd_y.append(vals)
+
+        # Authors'-station subset (uq-e2e surgical tweak): drop masks for the
+        # stations missing from the Aardvark authors' own lists, so the obs
+        # context matches the paper's setting. Masks are built by
+        # scripts/build_hadisd_station_subset.py; absent mask files or
+        # UQ_STATION_SUBSET=0 -> full station set.
+        self.hadisd_subset_drop = None
+        if os.environ.get("UQ_STATION_SUBSET", "1") != "0":
+            mask_paths = [
+                self.data_path
+                + "hadisd_processed/{}_pickle_subset_{}.npy".format(var, mode)
+                for var in hadisd_vars
+            ]
+            if all(os.path.exists(p) for p in mask_paths):
+                self.hadisd_subset_drop = [~np.load(p) for p in mask_paths]
+                print("HadISD: authors'-station subset active (obs context)")
 
         self.hadisd_index_offset = HADISD_OFFSETS[self.start_date]
 
@@ -462,11 +489,29 @@ class WeatherDataset(Dataset):
         return x
 
     def norm_data(self, x, means, stds):
-        return (x - means) / stds
+        if isinstance(stds, torch.Tensor):
+            safe_stds = stds.clone()
+            safe_stds[safe_stds == 0] = 1.0
+        else:
+            safe_stds = np.where(stds == 0, 1.0, stds)
+        return (x - means) / safe_stds
 
     def norm_hadisd(self, x):
-        for i in range(5):
-            x[i] = (x[i] - self.hadisd_means[i]) / self.hadisd_stds[i]
+        # Project tweak: the HadISD memmaps store physical values with the
+        # publisher shift removed (e.g. tas in deg C), while the norm factors
+        # (mean_hadisd/std_hadisd) and unnormalise_hadisd_var operate in
+        # publisher-scaled space. Restore the shift to recover physical units,
+        # then route through normalise_hadisd_var — the exact inverse of
+        # unnormalise_hadisd_var — so the forward and inverse transforms share
+        # a single convention across encoder and decoder. Vars without
+        # publisher factors (tds) fall back to shift 0 / scale 1, the raw space
+        # their factors were computed in. See scripts/convert_observations.py,
+        # which computes the factors in this space.
+        for i, var in enumerate(self.hadisd_vars):
+            shift = hadisd_publisher_shifts.get(var, 0.0)
+            x[i] = normalise_hadisd_var(
+                x[i] + shift, var, data_path=self.aux_data_path
+            )
         return x
 
     def __len__(self):
@@ -513,6 +558,8 @@ class WeatherDatasetAssimilation(WeatherDataset):
         var_end=24,
         diff=False,
         two_frames=False,
+        data_path="/data/",
+        aux_data_path="/data/",
     ):
 
         super().__init__(
@@ -525,6 +572,8 @@ class WeatherDatasetAssimilation(WeatherDataset):
             res=res,
             filter_dates=filter_dates,
             diff=diff,
+            data_path=data_path,
+            aux_data_path=aux_data_path,
         )
 
         # Setup
@@ -635,6 +684,10 @@ class WeatherDatasetAssimilation(WeatherDataset):
 
         # GRIDSAT
         sat_y = self.sat_y[index + self.sat_index_offset, ...]
+        if self.sat_lon_roll:
+            # Keep the values paired with the dateline-origin lon axis built
+            # in load_sat_data; (channel, lon, lat) -> roll the lon axis.
+            sat_y = np.roll(sat_y, -self.sat_lon_roll, axis=1)
         sat_x = [self.to_tensor(i) for i in self.sat_x]
         sat_y = self.to_tensor(sat_y)
         sat_y = self.norm_data(sat_y, self.sat_means, self.sat_stds)
@@ -684,6 +737,10 @@ class WeatherDatasetAssimilation(WeatherDataset):
         x_context_hadisd = [self.to_tensor(i).permute(1, 0) for i in x_context_hadisd]
         y_context_hadisd = [self.to_tensor(i) for i in y_context_hadisd]
         y_context_hadisd = self.norm_hadisd(y_context_hadisd)
+        if self.hadisd_subset_drop is not None:
+            # norm_hadisd returns fresh (arithmetic) tensors, so in-place is safe.
+            for y, drop in zip(y_context_hadisd, self.hadisd_subset_drop):
+                y[..., drop] = float("nan")
 
         # ERA5
         era5 = self.to_tensor(self.load_era5_time(index))
@@ -732,7 +789,16 @@ class HadISDDataset(Dataset):
     HadISD dataset for decoder training
     """
 
-    def __init__(self, var, mode, device, start_date, end_date):
+    def __init__(
+        self,
+        var,
+        mode,
+        device,
+        start_date,
+        end_date,
+        data_path="/data/",
+        aux_data_path="/data/",
+    ):
         super().__init__()
 
         # Setup
@@ -743,7 +809,9 @@ class HadISDDataset(Dataset):
         self.mode = mode
         self.start_date = start_date
         self.device = device
-        dates = pd.date_range(start_date, end_date, freq="6H")
+        self.data_path = data_path
+        self.aux_data_path = aux_data_path
+        dates = pd.date_range(start_date, end_date, freq="6h")
         self.index = np.array(range(len(dates)))
 
         # Load the hadISD data
@@ -754,8 +822,8 @@ class HadISDDataset(Dataset):
         Load the raw HadISD data
         """
 
-        data_path = "path_to_data/"
-        aux_data_path = "path_to_auxiliary_data/"
+        data_path = self.data_path
+        aux_data_path = self.aux_data_path
         var = self.var
         mode = self.mode
 
@@ -763,7 +831,7 @@ class HadISDDataset(Dataset):
             data_path + f"hadisd_processed/{var}_vals_{mode}.memmap",
             dtype="float32",
             mode="r",
-            shape=get_hadisd_shape(mode),
+            shape=get_hadisd_shape(mode, var=var),
         )
 
         lon = lon_to_0_360(
@@ -772,9 +840,21 @@ class HadISDDataset(Dataset):
         lat = np.load(data_path + f"hadisd_processed/{var}_lat_{mode}.npy")
         self.hadisd_x = np.stack([lon, lat], axis=-1) / LATLON_SCALE_FACTOR
         self.hadisd_alt = np.load(
-            data_path + f"hadisd_processed/{var}_alt_{mode}_final.npy"
+            data_path + f"hadisd_processed/{var}_alt_{mode}.npy"
         )
         self.hadisd_y = vals
+
+        # Authors'-station subset (uq-e2e surgical tweak): see
+        # WeatherDataset.load_hadisd. Applied to the target values in
+        # __getitem__ so verification matches the authors' station population.
+        self.subset_drop = None
+        if os.environ.get("UQ_STATION_SUBSET", "1") != "0":
+            mask_path = (
+                data_path + f"hadisd_processed/{var}_pickle_subset_{mode}.npy"
+            )
+            if os.path.exists(mask_path):
+                self.subset_drop = ~np.load(mask_path)
+                print(f"HadISD {var}: authors'-station subset active (targets)")
 
         self.hadisd_index_offset = HADISD_OFFSETS[self.start_date]
         self.hadisd_means = self.to_tensor(
@@ -783,13 +863,34 @@ class HadISDDataset(Dataset):
         self.hadisd_stds = self.to_tensor(
             np.load(aux_data_path + f"norm_factors/std_hadisd_{var}.npy")
         )
+
+        # Shared altitude normalisation factors (mean-std scheme), persisted once
+        # by convert_observations.py over all variables' stations. One (mean,
+        # std) pair per alt row: row 0 true station elevation (metres), row 1
+        # the demo pickle's second alt channel copied verbatim — already
+        # normalised, so its persisted factors are (0, 1) and the z-score below
+        # is a no-op for it.
+        self.alt_mean = np.load(aux_data_path + "norm_factors/mean_alt.npy").reshape(-1, 1)
+        self.alt_std = np.load(aux_data_path + "norm_factors/std_alt.npy").reshape(-1, 1)
+        if self.hadisd_alt.ndim != 2 or self.hadisd_alt.shape[0] != 2:
+            raise ValueError(
+                f"hadisd_processed/{var}_alt_{mode}.npy has shape "
+                f"{self.hadisd_alt.shape}; expected (2, n_stations) "
+                "(true station elevation, true minus ERA5 grid altitude) — "
+                "rerun convert_observations.py"
+            )
         return
 
     def norm_hadisd(self, x):
-        return (x - self.hadisd_means) / self.hadisd_stds
+        # Canonical transform — the exact inverse of unnormalise_hadisd_var —
+        # so decoder targets round-trip back to physical units through a single
+        # convention. ``x`` must be in physical units (e.g. tas in Kelvin).
+        return normalise_hadisd_var(x, self.var, data_path=self.aux_data_path)
 
     def unnorm_pred(self, x):
-        return self.hadisd_means + self.hadisd_stds * x
+        # Canonical inverse of norm_hadisd: normalised -> physical units
+        # (e.g. tas in Kelvin), matching the targets produced by __getitem__.
+        return unnormalise_hadisd_var(x, self.var, data_path=self.aux_data_path)
 
     def __len__(self):
         return self.index.shape[0] - 2
@@ -803,18 +904,32 @@ class HadISDDataset(Dataset):
         # Get longitude-latitude locations
         x_target = self.to_tensor(self.hadisd_x).permute(1, 0)
 
-        # Get altitude and normalise
-        m_alt = np.expand_dims(np.load("path_to_mean_alt.npy"), 1)
-        s_alt = np.expand_dims(np.load("path_to_std_alt.npy"), 1)
-        alt_target = self.to_tensor((self.hadisd_alt - m_alt) / s_alt)[:, :]
+        # Get altitude and normalise using the shared mean-std factors. The alt
+        # arrays are (2, n_stations) — row 0 true station elevation (z-scored
+        # here), row 1 the pickle's normalised second channel (passed through
+        # by its (0, 1) factors) — giving the model's expected channel count
+        # (24 state + 5 time + 2 loc + 2 alt = 33).
+        alt_norm = (self.hadisd_alt - self.alt_mean) / self.alt_std
+        alt_target = self.to_tensor(alt_norm)
 
-        # Get observations
-        y_target = self.norm_hadisd(
-            self.to_tensor(self.hadisd_y[index + self.hadisd_index_offset, :])
-        )
+        # Get observations.
+        #
+        # The hadisd_processed/*_vals_*.memmap files store observations in
+        # physical units with the publisher shift removed, e.g. tas in degrees
+        # Celsius (T - 273.15). Restore the shift to recover physical units,
+        # then normalise with norm_hadisd (the exact inverse of
+        # unnormalise_hadisd_var) so targets round-trip back to physical units
+        # on the same scale as the decoder's predictions.
+        obs = self.to_tensor(self.hadisd_y[index + self.hadisd_index_offset, :])
+        obs = obs + hadisd_publisher_shifts[self.var]
+        y_target = self.norm_hadisd(obs)
+        if self.subset_drop is not None:
+            # norm_hadisd returns a fresh tensor, so in-place is safe.
+            y_target[self.subset_drop] = float("nan")
 
         assert x_target.shape[0] == 2
         n_stations = x_target.shape[1]
+        assert alt_target.shape[0] == 2
         assert alt_target.shape[1] == n_stations
         assert y_target.shape[0] == n_stations
 
@@ -843,7 +958,7 @@ class AardvarkICDataset(Dataset):
                 print((start_date, end_date))
                 raise Exception("Invalid start and end date")
 
-            dates = pd.date_range(start_date, end_date, freq="6H")
+            dates = pd.date_range(start_date, end_date, freq="6h")
 
             self.data = np.memmap(
                 "path_to_encoder_predictions/" + ic_fname,
@@ -864,7 +979,7 @@ class AardvarkICDataset(Dataset):
                 print((start_date, end_date))
                 raise Exception("Invalid start and end date.")
 
-            dates = pd.date_range(start_date, end_date, freq="6H")[(lead_time) * 4 :]
+            dates = pd.date_range(start_date, end_date, freq="6h")[(lead_time) * 4 :]
             ic_shape = (len(dates), 121, 240, 24)
 
             self.data = np.memmap(
@@ -928,7 +1043,7 @@ class WeatherDatasetDownscaling(Dataset):
         self.res = res
         self.context_mode = context_mode
 
-        self.dates = pd.date_range(start_date, end_date, freq="6H")
+        self.dates = pd.date_range(start_date, end_date, freq="6h")
         self.index = np.array(range(len(self.dates)))
 
         # Load ERA5 data for pre-training
@@ -946,7 +1061,9 @@ class WeatherDatasetDownscaling(Dataset):
 
         # Load orography
         elev_path = self.data_path + f"era5/elev_vars_{res}.npy"
-        self.era5_elev = self.to_tensor(np.load(elev_path)).permute(0, 2, 1)
+        # On-disk layout is (lon, lat, channel), as consumed by the other
+        # dataset classes; rearrange to (channel, lat, lon).
+        self.era5_elev = self.to_tensor(np.load(elev_path)).permute(2, 1, 0)
 
         # Normalisation
         mean_factors_path = (
@@ -1121,7 +1238,13 @@ class WeatherDatasetDownscaling(Dataset):
 
 class ForecasterDatasetDownscaling(Dataset):
     """
-    Dataset to generate decoder predictions from pre-saved Aardvark forecasts
+    Dataset for decoder training / evaluation from processor forecasts.
+
+    If ``forecast_path`` is given, pre-saved processor forecasts (normalised
+    diff predictions) are loaded and recombined with the ERA5 base state at
+    analysis time. With ``forecast_path=None`` the ERA5 ground truth at the
+    forecast time is used directly as the gridded context — useful when the
+    forecast channels are overwritten by a live processor output anyway.
     """
 
     def __init__(
@@ -1134,11 +1257,12 @@ class ForecasterDatasetDownscaling(Dataset):
         device,
         forecast_path,
         region="global",
+        data_path="/data/",
+        aux_data_path="/data/",
     ):
         super().__init__()
 
         # Setup
-
         if not mode in ["train", "val", "test"]:
             raise Exception(f"Mode is {mode}. Must be either train, val, or test")
 
@@ -1148,26 +1272,41 @@ class ForecasterDatasetDownscaling(Dataset):
         self.lead_time = lead_time
         self.mode = mode
         self.offset = np.timedelta64(lead_time, "D").astype("timedelta64[ns]")
+        self.data_path = data_path
+        self.aux_data_path = aux_data_path
+        self.forecast_path = forecast_path
 
-        self.dates = pd.date_range(start_date, end_date, freq="6H")[:-30]
+        self.dates = pd.date_range(start_date, end_date, freq="6h")[:-30]
 
-        # Normalisation
-        aux_data_path = "auxiliary_data_path/"
-        self.means = np.load(aux_data_path + "norm_factors/mean_4u_1.npy")
-        self.stds = np.load(aux_data_path + "norm_factors/std_4u_1.npy")
+        # Normalisation (matching e2e_model.py forecast_input_means/stds)
+        self.means = np.load(self.aux_data_path + "norm_factors/mean_4u_1.npy")
+        self.stds = np.load(self.aux_data_path + "norm_factors/std_4u_1.npy")
+        # Diff normalisation (matching e2e_model.py forecast_pred_diff_means/stds)
+        self.diff_means = np.load(
+            self.aux_data_path + "norm_factors/mean_diff_4u_1.npy"
+        )
+        self.diff_stds = np.load(self.aux_data_path + "norm_factors/std_diff_4u_1.npy")
 
         # Load auxiliary data
         self.load_npy_file()
-        data_path = "data_path/"
         res = "1"
-        raw_era5_lon = np.load(data_path + f"era5/era5_x_{res}.npy")
-        raw_era5_lat = np.load(data_path + f"era5/era5_y_{res}.npy")
+        raw_era5_lon = np.load(self.data_path + f"era5/era5_x_{res}.npy")
+        raw_era5_lat = np.load(self.data_path + f"era5/era5_y_{res}.npy")
         self.era5_x = [
             self.to_tensor(raw_era5_lon) / LATLON_SCALE_FACTOR,
             self.to_tensor(raw_era5_lat) / LATLON_SCALE_FACTOR,
         ]
-        elev_path = data_path + f"era5/elev_vars_{res}.npy"
-        self.era5_elev = self.to_tensor(np.load(elev_path)).permute(0, 2, 1)
+        elev_path = self.data_path + f"era5/elev_vars_{res}.npy"
+        self.era5_elev = self.to_tensor(np.load(elev_path)).permute(2, 0, 1)
+
+        # ERA5 base state at 6-hourly cadence for every year in range
+        self.era5_mode = "4u"
+        self.res = 1
+
+        self.era5_sfc = [
+            self.load_era5(year)
+            for year in range(int(self.start_date[:4]), int(self.end_date[:4]) + 1)
+        ]
 
         # Load hadISD
         self.hadisd_data = HadISDDataset(
@@ -1176,6 +1315,8 @@ class ForecasterDatasetDownscaling(Dataset):
             device=device,
             start_date=start_date,
             end_date=end_date,
+            data_path=self.data_path,
+            aux_data_path=self.aux_data_path,
         )
 
         # Subset to region
@@ -1194,22 +1335,91 @@ class ForecasterDatasetDownscaling(Dataset):
 
     def load_npy_file(self):
         """
-        Load the pre-saved Aardvark forecasts
+        Load the pre-saved processor forecasts, or fall back to using ERA5
+        directly when no forecast_path is provided.
         """
 
-        dates = pd.date_range(self.start_date, self.end_date, freq="6H")
+        dates = pd.date_range(self.start_date, self.end_date, freq="6h")
 
         if self.mode == "train":
             dates = dates[:-40]  # Need 10 day offset at end of year
 
+        if self.forecast_path is None:
+            self.Y_context = None
+            self.use_era5_directly = True
+            return
+
+        self.use_era5_directly = False
+        forecast_file = f"{self.forecast_path}/forecast_{self.mode}.mmap"
+
+        if not os.path.exists(forecast_file):
+            raise FileNotFoundError(
+                f"Processor forecast file not found: {forecast_file}\n"
+                f"Please generate forecast files using scripts/generate_processor_forecasts.sh\n"
+                f"Or use forecast_path=None to use ERA5 data directly"
+            )
+
         self.Y_context = np.memmap(
-            "path_to_forecasts/forecast_{}.mmap".format(self.mode),
+            forecast_file,
             dtype="float32",
             mode="r",
             shape=(len(dates), 121, 240, 24, 11),
         )
 
         return
+
+    def load_era5(self, year):
+        """
+        Load one year of 6-hourly ERA5 as a memmap
+        """
+
+        if year % 4 == 0:
+            d = 366 * 4
+        else:
+            d = 365 * 4
+
+        if self.era5_mode == "sfc":
+            levels = 4
+        elif self.era5_mode == "13u":
+            levels = 69
+        elif self.era5_mode == "4u":
+            levels = 24
+        else:
+            levels = 4
+
+        if self.res == 1:
+            x = 240
+            y = 121
+        else:
+            x = 64
+            y = 32
+
+        filename = self.data_path + "era5/era5_{}_{}_6_{}.memmap".format(
+            self.era5_mode, self.res, year
+        )
+
+        return np.memmap(
+            filename,
+            dtype="float32",
+            mode="r",
+            shape=(d, levels, x, y),
+        )
+
+    def load_era5_at_time(self, date):
+        """Load the ERA5 field at a specific date as (lat, lon, channels)."""
+
+        year_idx = date.year - int(self.start_date[:4])
+        if year_idx < 0 or year_idx >= len(self.era5_sfc):
+            raise IndexError(
+                f"Date {date} outside loaded years {self.start_date} to {self.end_date}"
+            )
+
+        idx = (date.dayofyear - 1) * 4 + date.hour // 6
+        era5_data = self.era5_sfc[year_idx][idx, ...]
+
+        # Memmap slice is (channels, lon, lat); transpose to (lat, lon, channels)
+        # which is what norm_era5 and __getitem__ expect.
+        return np.transpose(era5_data, (2, 1, 0))
 
     def norm_era5(self, x):
         return (x - self.means) / self.stds
@@ -1257,12 +1467,33 @@ class ForecasterDatasetDownscaling(Dataset):
         # Load auxiliary time
         aux_time = torch.reshape(self.to_tensor(self.get_time_aux(index)), (-1, 1, 1))
 
-        # Load input
-        y_context = self.norm_era5(self.Y_context[index, ..., self.lead_time])
+        # Load input - either from processor forecasts or ERA5 directly
+        if self.use_era5_directly:
+            # Load ERA5 at the FORECAST time (t + lead) to match what the
+            # decoder was trained on (processor forecasts represent the
+            # atmospheric state at the forecast time, not the analysis time).
+            forecast_date = self.dates[index + 4 * self.lead_time]
+            era5_data = self.load_era5_at_time(forecast_date)
+            y_context = self.norm_era5(era5_data)
+        else:
+            # Stored values are normalised diff predictions from the processor.
+            # Unnormalise following e2e_model.py process_forecast_output:
+            raw_diff = self.Y_context[index, ..., self.lead_time]
+
+            # Unnorm diff prediction
+            unnorm_diff = self.diff_means + raw_diff * self.diff_stds
+
+            # Load ERA5 base state at analysis time
+            era5_base = self.load_era5_at_time(self.dates[index])
+
+            # Full forecast = diff + base, re-normalised for decoder input
+            unnorm_forecast = unnorm_diff + era5_base
+            y_context = (unnorm_forecast - self.means) / self.stds
+
         y_context = torch.cat(
             [
                 self.to_tensor(y_context).permute(2, 1, 0),
-                self.era5_elev.permute(0, 2, 1),
+                self.era5_elev,
                 aux_time.repeat(1, n_lon, n_lat),
             ]
         )
@@ -1281,7 +1512,7 @@ class ForecasterDatasetDownscaling(Dataset):
             "y_context": y_context,
             "x_context": x_context,
             "aux_time": aux_time,
-            "lt": torch.Tensor([0]),
+            "lt": torch.tensor([self.lead_time]),  # Lead time for film conditioning
         }
 
 
@@ -1307,6 +1538,10 @@ class ForecastLoader(Dataset):
         finetune_step=None,
         finetune_eval_every=100,
         eval_steps=False,
+        data_path="/data/",
+        aux_data_path="/data/",
+        start_date=None,
+        end_date=None,
     ):
 
         super().__init__()
@@ -1314,7 +1549,8 @@ class ForecastLoader(Dataset):
         # Setup
         self.device = device
         self.mode = mode
-        self.data_path = "data_path/"
+        self.data_path = data_path
+        self.aux_data_path = aux_data_path
 
         self.lead_time = lead_time
         self.era5_mode = era5_mode
@@ -1333,13 +1569,15 @@ class ForecastLoader(Dataset):
 
         if self.frequency == 6:
             self.lead_time = self.lead_time * 4
-            freq = "6H"
+            freq = "6h"
 
         else:
             freq = "1D"
 
-        if self.mode == "train":
-            self.dates = pd.date_range("1979-01-01", "2017-12-31", freq=freq)
+        if start_date is not None and end_date is not None:
+            self.dates = pd.date_range(start_date, end_date, freq=freq)
+        elif self.mode == "train":
+            self.dates = pd.date_range("2007-01-02", "2017-12-31", freq=freq)
         elif self.mode == "tune":
             self.dates = pd.date_range("2018-01-01", "2018-12-31", freq=freq)
         elif self.mode == "test":
@@ -1405,10 +1643,11 @@ class ForecastLoader(Dataset):
                 shape=ic_shape,
             )
 
-        # Orography
+        # Orography — file shape is (240, 121, C), transpose to (C, 240, 121)
         self.era5_elev = np.float32(
             np.load(self.data_path + "era5/elev_vars_{}.npy".format(res))
         )
+        self.era5_elev = self.era5_elev.transpose(2, 0, 1)
         elev_mean = self.era5_elev.mean(axis=(1, 2))[:, np.newaxis, np.newaxis]
         elev_std = self.era5_elev.std(axis=(1, 2))[:, np.newaxis, np.newaxis]
         self.era5_elev = (self.era5_elev - elev_mean) / elev_std
@@ -1423,7 +1662,7 @@ class ForecastLoader(Dataset):
         self.means = (
             self.to_tensor(
                 np.load(
-                    self.data_path
+                    self.aux_data_path
                     + "norm_factors/mean_{}_{}.npy".format(self.era5_mode, self.res)
                 )
             )
@@ -1433,7 +1672,7 @@ class ForecastLoader(Dataset):
         self.stds = (
             self.to_tensor(
                 np.load(
-                    self.data_path
+                    self.aux_data_path
                     + "norm_factors/std_{}_{}.npy".format(self.era5_mode, self.res)
                 )
             )
@@ -1443,7 +1682,7 @@ class ForecastLoader(Dataset):
         self.diff_means = (
             self.to_tensor(
                 np.load(
-                    self.data_path
+                    self.aux_data_path
                     + "norm_factors/mean_diff_{}_{}.npy".format(
                         self.era5_mode, self.res
                     )
@@ -1455,7 +1694,7 @@ class ForecastLoader(Dataset):
         self.diff_stds = (
             self.to_tensor(
                 np.load(
-                    self.data_path
+                    self.aux_data_path
                     + "norm_factors/std_diff_{}_{}.npy".format(self.era5_mode, self.res)
                 )
             )
@@ -1463,54 +1702,27 @@ class ForecastLoader(Dataset):
             .unsqueeze(0)
         )
 
-        self.diff_means_1 = (
-            self.to_tensor(
-                np.load(
-                    self.data_path
-                    + "norm_factors/mean_diff_{}_{}_6h.npy".format(
-                        self.era5_mode, self.res
-                    )
-                )
-            )
-            .unsqueeze(0)
-            .unsqueeze(0)
-        )
-        self.diff_stds_1 = (
-            self.to_tensor(
-                np.load(
-                    self.data_path
-                    + "norm_factors/std_diff_{}_{}_6h.npy".format(
-                        self.era5_mode, self.res
-                    )
-                )
-            )
-            .unsqueeze(0)
-            .unsqueeze(0)
-        )
+        # The 6h/12h tendency norm factors are only consumed by
+        # norm_era5_tendency under random_lt training. Load them lazily so
+        # eval (random_lt=False, lt_offset always 0) does not require files
+        # that may not have been computed (e.g. the 12h factor).
+        def _load_optional_norm(name):
+            path = self.aux_data_path + "norm_factors/{}.npy".format(name)
+            if not os.path.exists(path):
+                return None
+            return self.to_tensor(np.load(path)).unsqueeze(0).unsqueeze(0)
 
-        self.diff_means_2 = (
-            self.to_tensor(
-                np.load(
-                    self.data_path
-                    + "norm_factors/mean_diff_{}_{}_12h.npy".format(
-                        self.era5_mode, self.res
-                    )
-                )
-            )
-            .unsqueeze(0)
-            .unsqueeze(0)
+        self.diff_means_1 = _load_optional_norm(
+            "mean_diff_{}_{}_6h".format(self.era5_mode, self.res)
         )
-        self.diff_stds_2 = (
-            self.to_tensor(
-                np.load(
-                    self.data_path
-                    + "norm_factors/std_diff_{}_{}_12h.npy".format(
-                        self.era5_mode, self.res
-                    )
-                )
-            )
-            .unsqueeze(0)
-            .unsqueeze(0)
+        self.diff_stds_1 = _load_optional_norm(
+            "std_diff_{}_{}_6h".format(self.era5_mode, self.res)
+        )
+        self.diff_means_2 = _load_optional_norm(
+            "mean_diff_{}_{}_12h".format(self.era5_mode, self.res)
+        )
+        self.diff_stds_2 = _load_optional_norm(
+            "std_diff_{}_{}_12h".format(self.era5_mode, self.res)
         )
 
         self.means_dict = {
@@ -1656,8 +1868,8 @@ class ForecastLoader(Dataset):
 
         else:
             if self.norm:
-                y_context[:24, ...] = self.norm_era5(y_context[:24, ...], lt_offset)
-                y_target = self.norm_era5(y_target, lt_offset)
+                y_context[:24, ...] = self.norm_era5(y_context[:24, ...])
+                y_target = self.norm_era5(y_target)
             y_target = y_target.permute(2, 1, 0)
 
         if self.rollout:
@@ -1707,6 +1919,8 @@ class WeatherDatasetE2E(WeatherDataset):
         diff=False,
         two_frames=False,
         region="global",
+        data_path="/data/",
+        aux_data_path="/data/",
     ):
 
         super().__init__(
@@ -1719,6 +1933,8 @@ class WeatherDatasetE2E(WeatherDataset):
             res=res,
             filter_dates=filter_dates,
             diff=diff,
+            data_path=data_path,
+            aux_data_path=aux_data_path,
         )
 
         # Setup
@@ -1744,6 +1960,8 @@ class WeatherDatasetE2E(WeatherDataset):
             var_end=24,
             diff=False,
             two_frames=False,
+            data_path=data_path,
+            aux_data_path=aux_data_path,
         )
 
         # Initialise forecast dataset
@@ -1757,6 +1975,8 @@ class WeatherDatasetE2E(WeatherDataset):
             diff=True,
             u_only=False,
             random_lt=False,
+            data_path=data_path,
+            aux_data_path=aux_data_path,
         )
 
         # Initialise downscaling dataset
@@ -1769,6 +1989,8 @@ class WeatherDatasetE2E(WeatherDataset):
             device=device,
             forecast_path=None,
             region=region,
+            data_path=data_path,
+            aux_data_path=aux_data_path,
         )
 
     def __len__(self):

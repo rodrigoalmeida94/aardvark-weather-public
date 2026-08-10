@@ -1,13 +1,14 @@
+import os
 import pickle
 
 import torch
 import numpy as np
 import torch.nn as nn
 
-from set_convs import convDeepSet
-from unet_wrap_padding import Unet
-from vit import *
-from models import *
+from aardvark.set_convs import convDeepSet
+from aardvark.unet_wrap_padding import Unet
+from aardvark.vit import *
+from aardvark.models import *
 
 hadisd_publisher_shifts = {
     "tas": 273.15,
@@ -26,20 +27,55 @@ hadisd_publisher_scales = {
 }
 
 
-def hadisd_normalisation_factors(var: str):
-    path = "/home/azureuser/aux_data/norm_factors/"
+def hadisd_normalisation_factors(var: str, data_path: str | None = None):
+    if data_path is None:
+        data_path = os.environ.get("DATA_PATH", "/data/")
+    path = os.path.join(data_path, "norm_factors/")
     return {
         "mean": np.load(path + f"mean_hadisd_{var}.npy"),
         "std": np.load(path + f"std_hadisd_{var}.npy"),
     }
 
 
-def unnormalise_hadisd_var(x, var):
-    factors = hadisd_normalisation_factors(var)
+def unnormalise_hadisd_var(x, var, data_path=None):
+    factors = hadisd_normalisation_factors(var, data_path=data_path)
     hadisd_shift = hadisd_publisher_shifts[var]
     hadisd_scale = hadisd_publisher_scales[var]
 
-    return hadisd_shift + hadisd_scale * (factors["mean"] + factors["std"] * x)
+    mean = factors["mean"]
+    std = factors["std"]
+
+    if isinstance(x, torch.Tensor):
+        mean = torch.tensor(mean, device=x.device, dtype=x.dtype)
+        std = torch.tensor(std, device=x.device, dtype=x.dtype)
+
+    return hadisd_shift + hadisd_scale * (mean + std * x)
+
+
+def normalise_hadisd_var(x, var, data_path=None):
+    """Exact inverse of :func:`unnormalise_hadisd_var`: physical units -> normalised.
+
+    Every consumer that normalises HadISD observations must route through this
+    function so the forward and inverse transforms share a single convention
+    (publisher-scaled norm factors). Vars without publisher factors (e.g. tds)
+    fall back to shift 0 / scale 1, matching the raw space their norm factors
+    were computed in.
+    """
+    factors = hadisd_normalisation_factors(var, data_path=data_path)
+    hadisd_shift = hadisd_publisher_shifts.get(var, 0.0)
+    hadisd_scale = hadisd_publisher_scales.get(var, 1.0)
+
+    mean = factors["mean"]
+    std = factors["std"]
+
+    if isinstance(x, torch.Tensor):
+        mean = torch.tensor(mean, device=x.device, dtype=x.dtype)
+        std = torch.tensor(std, device=x.device, dtype=x.dtype)
+        std = torch.where(std == 0, torch.ones_like(std), std)
+    else:
+        std = np.where(std == 0, 1.0, std)
+
+    return ((x - hadisd_shift) / hadisd_scale - mean) / std
 
 
 class DownscalingRmseLoss(nn.Module):
@@ -54,6 +90,9 @@ class DownscalingRmseLoss(nn.Module):
         tmp = torch.isnan(target)
         clean_target = target[~tmp]
         clean_output = output[~tmp]
+
+        if len(clean_target) == 0:
+            return torch.tensor(float("nan"), device=output.device, requires_grad=True)
 
         return torch.mean((clean_target - clean_output) ** 2)
 
@@ -128,7 +167,7 @@ class ConvCNPWeatherOnToOff(nn.Module):
 
         # Postprocessing MLP
         self.mlp = DownscalingMLP(
-            in_channels=24 + 9,
+            in_channels=self.int_channels + 9,
             out_channels=1,
             h_channels=64,
             h_layers=2,

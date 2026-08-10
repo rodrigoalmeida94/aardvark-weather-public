@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from utils import *
+from aardvark.utils import *
 
 
 class MLP(nn.Module):

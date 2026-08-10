@@ -11,13 +11,13 @@ import torch.multiprocessing as mp
 from torch.utils.data.distributed import DistributedSampler
 from torch.distributed import init_process_group, destroy_process_group
 
-from misc_downscaling_functionality import DownscalingRmseLoss
-from e2e_model import *
-from loader import *
-from models import *
-from unet_wrap_padding import *
-from trainer import DDPTrainerE2E
-from loss_functions import WeightedRmseLoss, PressureWeightedRmseLoss, RmseLoss
+from aardvark.misc_downscaling_functionality import DownscalingRmseLoss
+from aardvark.e2e_model import *
+from aardvark.loader import *
+from aardvark.models import *
+from aardvark.unet_wrap_padding import *
+from aardvark.trainer import DDPTrainerE2E
+from aardvark.loss_functions import WeightedRmseLoss, PressureWeightedRmseLoss, RmseLoss
 
 torch.set_float32_matmul_precision("medium")
 
