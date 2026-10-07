@@ -282,8 +282,8 @@ class ConvCNPWeather(nn.Module):
         )
 
         self.int_grid = [
-            (torch.linspace(0, 360, 240) / 360).float().cuda(),
-            (torch.linspace(-90, 90, 121) / 360).float().cuda(),
+            (torch.linspace(0, 360, 240) / 360).float().to(self.device),
+            (torch.linspace(-90, 90, 121) / 360).float().to(self.device),
         ]
 
         self.int_grid = [self.int_grid[0].unsqueeze(0), self.int_grid[1].unsqueeze(0)]
